@@ -1,0 +1,40 @@
+{
+  "fixtureType": "stale_approved_fallback",
+  "description": "Sanitized example showing how page-level metadata should point to an older approved snapshot while a newer OneNote change exists and the latest reparse has not yet been accepted.",
+  "page": {
+    "pageId": "page_demo_ai_001",
+    "classId": "class_demo_english_b",
+    "pageTitle": "Student 014 - legacy diary sample",
+    "studentName": "Student 014",
+    "syncState": "error",
+    "parserMode": "ai",
+    "templateVersion": "legacy-ai",
+    "currentSnapshotId": "snapshot_demo_ai_2026_04_02_failed_attempt_context",
+    "approvedSnapshotId": "snapshot_demo_ai_2026_03_31",
+    "currentOneNoteLastModified": "2026-04-02T02:40:00.000Z",
+    "lastParsedAt": "2026-04-02T02:42:10.000Z",
+    "lastViewedAt": "2026-04-02T02:50:00.000Z",
+    "nextRetryAt": "2026-04-02T03:15:00.000Z",
+    "lastError": "AI parsing could not safely complete a re-parse after the page changed.",
+    "updatedAt": "2026-04-02T02:50:00.000Z"
+  },
+  "approvedSnapshot": {
+    "snapshotId": "snapshot_demo_ai_2026_03_31",
+    "statusSummary": "approved",
+    "stale": true,
+    "parseFallbackUsed": true,
+    "oneNoteLastModified": "2026-03-31T04:05:00.000Z",
+    "entryCount": 3
+  },
+  "latestAttemptContext": {
+    "attemptedSnapshotId": "snapshot_demo_ai_2026_04_02_failed_attempt_context",
+    "attemptedAgainstOneNoteLastModified": "2026-04-02T02:40:00.000Z",
+    "result": "failed_reparse_keep_approved_snapshot_visible"
+  },
+  "uiExpectation": {
+    "structuredViewSource": "approvedSnapshotId",
+    "showStaleBanner": true,
+    "allowExplicitRetry": true,
+    "allowRawView": true
+  }
+}

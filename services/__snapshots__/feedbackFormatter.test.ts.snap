@@ -1,0 +1,250 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderFeedbackToHTML — field-interleaved blockquote-and-comment > omits diary section when includeDiary is false 1`] = `
+"
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b;">
+      <h2 style="color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px;">Weekly Journal Feedback</h2>
+      <p style="font-size: 15px; line-height: 1.6; white-space: pre-wrap; margin: 0 0 4px 0;">Hi Hanako,
+
+Thank you for your journal entry this week!</p>
+  
+      <div style="margin: 20px 0 28px 0; padding: 14px 16px; background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px;">
+        <p style="margin: 0; color: #9a3412; font-size: 13px; line-height: 1.6; white-space: pre-wrap;">This feedback is meant to support, not grade. Focus on one or two items at a time.</p>
+      </div>
+    
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Vocabulary</h3>
+    
+        <blockquote style="margin: 0; padding: 10px 16px; background-color: #f1f5f9; border-radius: 8px; color: #475569; font-size: 14px; line-height: 1.6;">
+          <ul style="margin: 0; padding-left: 20px;"><li style="margin-bottom: 2px;">library</li><li style="margin-bottom: 2px;">productive</li></ul>
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Good range. &quot;Productive&quot; used well in context.</p>
+        </div>
+      </div>
+    
+      <div style="margin-top: 32px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+        <h3 style="color: #0f172a; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Overall Comments</h3>
+        <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Steady week — keep building on this momentum.</p>
+      </div>
+    
+      <p style="margin-top: 32px; font-size: 13px; color: #64748b; line-height: 1.6; white-space: pre-wrap;">Keep up the great work!
+
+Best,
+Mr. Carr</p>
+    </div>
+  "
+`;
+
+exports[`renderFeedbackToHTML — field-interleaved blockquote-and-comment > omits overall section when includeOverall is false 1`] = `
+"
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b;">
+      <h2 style="color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px;">Weekly Journal Feedback</h2>
+      <p style="font-size: 15px; line-height: 1.6; white-space: pre-wrap; margin: 0 0 4px 0;">Hi Hanako,
+
+Thank you for your journal entry this week!</p>
+  
+      <div style="margin: 20px 0 28px 0; padding: 14px 16px; background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px;">
+        <p style="margin: 0; color: #9a3412; font-size: 13px; line-height: 1.6; white-space: pre-wrap;">This feedback is meant to support, not grade. Focus on one or two items at a time.</p>
+      </div>
+    
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Diary Content</h3>
+    
+        <blockquote style="margin: 0; padding: 12px 16px; background-color: #f1f5f9; border-radius: 8px; font-style: italic; color: #475569; font-size: 14px; line-height: 1.65;">
+          &ldquo;This week I went to the library and studied English. It was a productive week.&rdquo;
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Strong topic sentence. Watch tense consistency in paragraph two.</p>
+        </div>
+      </div>
+    
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Vocabulary</h3>
+    
+        <blockquote style="margin: 0; padding: 10px 16px; background-color: #f1f5f9; border-radius: 8px; color: #475569; font-size: 14px; line-height: 1.6;">
+          <ul style="margin: 0; padding-left: 20px;"><li style="margin-bottom: 2px;">library</li><li style="margin-bottom: 2px;">productive</li></ul>
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Good range. &quot;Productive&quot; used well in context.</p>
+        </div>
+      </div>
+    
+      <p style="margin-top: 32px; font-size: 13px; color: #64748b; line-height: 1.6; white-space: pre-wrap;">Keep up the great work!
+
+Best,
+Mr. Carr</p>
+    </div>
+  "
+`;
+
+exports[`renderFeedbackToHTML — field-interleaved blockquote-and-comment > omits review notice when empty 1`] = `
+"
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b;">
+      <h2 style="color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px;">Weekly Journal Feedback</h2>
+      <p style="font-size: 15px; line-height: 1.6; white-space: pre-wrap; margin: 0 0 4px 0;">Hi Hanako,
+
+Thank you for your journal entry this week!</p>
+  
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Diary Content</h3>
+    
+        <blockquote style="margin: 0; padding: 12px 16px; background-color: #f1f5f9; border-radius: 8px; font-style: italic; color: #475569; font-size: 14px; line-height: 1.65;">
+          &ldquo;This week I went to the library and studied English. It was a productive week.&rdquo;
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Strong topic sentence. Watch tense consistency in paragraph two.</p>
+        </div>
+      </div>
+    
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Vocabulary</h3>
+    
+        <blockquote style="margin: 0; padding: 10px 16px; background-color: #f1f5f9; border-radius: 8px; color: #475569; font-size: 14px; line-height: 1.6;">
+          <ul style="margin: 0; padding-left: 20px;"><li style="margin-bottom: 2px;">library</li><li style="margin-bottom: 2px;">productive</li></ul>
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Good range. &quot;Productive&quot; used well in context.</p>
+        </div>
+      </div>
+    
+      <div style="margin-top: 32px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+        <h3 style="color: #0f172a; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Overall Comments</h3>
+        <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Steady week — keep building on this momentum.</p>
+      </div>
+    
+      <p style="margin-top: 32px; font-size: 13px; color: #64748b; line-height: 1.6; white-space: pre-wrap;">Keep up the great work!
+
+Best,
+Mr. Carr</p>
+    </div>
+  "
+`;
+
+exports[`renderFeedbackToHTML — field-interleaved blockquote-and-comment > omits vocab section when includeVocab is false 1`] = `
+"
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b;">
+      <h2 style="color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px;">Weekly Journal Feedback</h2>
+      <p style="font-size: 15px; line-height: 1.6; white-space: pre-wrap; margin: 0 0 4px 0;">Hi Hanako,
+
+Thank you for your journal entry this week!</p>
+  
+      <div style="margin: 20px 0 28px 0; padding: 14px 16px; background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px;">
+        <p style="margin: 0; color: #9a3412; font-size: 13px; line-height: 1.6; white-space: pre-wrap;">This feedback is meant to support, not grade. Focus on one or two items at a time.</p>
+      </div>
+    
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Diary Content</h3>
+    
+        <blockquote style="margin: 0; padding: 12px 16px; background-color: #f1f5f9; border-radius: 8px; font-style: italic; color: #475569; font-size: 14px; line-height: 1.65;">
+          &ldquo;This week I went to the library and studied English. It was a productive week.&rdquo;
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Strong topic sentence. Watch tense consistency in paragraph two.</p>
+        </div>
+      </div>
+    
+      <div style="margin-top: 32px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+        <h3 style="color: #0f172a; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Overall Comments</h3>
+        <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Steady week — keep building on this momentum.</p>
+      </div>
+    
+      <p style="margin-top: 32px; font-size: 13px; color: #64748b; line-height: 1.6; white-space: pre-wrap;">Keep up the great work!
+
+Best,
+Mr. Carr</p>
+    </div>
+  "
+`;
+
+exports[`renderFeedbackToHTML — field-interleaved blockquote-and-comment > renders only diary section when other includes are false and notice is empty 1`] = `
+"
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b;">
+      <h2 style="color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px;">Weekly Journal Feedback</h2>
+      <p style="font-size: 15px; line-height: 1.6; white-space: pre-wrap; margin: 0 0 4px 0;">Hi Hanako,
+
+Thank you for your journal entry this week!</p>
+  
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Diary Content</h3>
+    
+        <blockquote style="margin: 0; padding: 12px 16px; background-color: #f1f5f9; border-radius: 8px; font-style: italic; color: #475569; font-size: 14px; line-height: 1.65;">
+          &ldquo;This week I went to the library and studied English. It was a productive week.&rdquo;
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Strong topic sentence. Watch tense consistency in paragraph two.</p>
+        </div>
+      </div>
+    
+      <p style="margin-top: 32px; font-size: 13px; color: #64748b; line-height: 1.6; white-space: pre-wrap;">Keep up the great work!
+
+Best,
+Mr. Carr</p>
+    </div>
+  "
+`;
+
+exports[`renderFeedbackToHTML — field-interleaved blockquote-and-comment > renders the full message with all three sections included 1`] = `
+"
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b;">
+      <h2 style="color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px;">Weekly Journal Feedback</h2>
+      <p style="font-size: 15px; line-height: 1.6; white-space: pre-wrap; margin: 0 0 4px 0;">Hi Hanako,
+
+Thank you for your journal entry this week!</p>
+  
+      <div style="margin: 20px 0 28px 0; padding: 14px 16px; background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 10px;">
+        <p style="margin: 0; color: #9a3412; font-size: 13px; line-height: 1.6; white-space: pre-wrap;">This feedback is meant to support, not grade. Focus on one or two items at a time.</p>
+      </div>
+    
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Diary Content</h3>
+    
+        <blockquote style="margin: 0; padding: 12px 16px; background-color: #f1f5f9; border-radius: 8px; font-style: italic; color: #475569; font-size: 14px; line-height: 1.65;">
+          &ldquo;This week I went to the library and studied English. It was a productive week.&rdquo;
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Strong topic sentence. Watch tense consistency in paragraph two.</p>
+        </div>
+      </div>
+    
+      <div style="margin-top: 28px;">
+        <h3 style="color: #334155; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Vocabulary</h3>
+    
+        <blockquote style="margin: 0; padding: 10px 16px; background-color: #f1f5f9; border-radius: 8px; color: #475569; font-size: 14px; line-height: 1.6;">
+          <ul style="margin: 0; padding-left: 20px;"><li style="margin-bottom: 2px;">library</li><li style="margin-bottom: 2px;">productive</li></ul>
+        </blockquote>
+      
+        <div style="margin-top: 8px; padding: 12px 14px; background-color: #eef2ff; border-left: 3px solid #4f46e5; border-radius: 4px;">
+          <p style="margin: 0 0 4px 0; color: #4338ca; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;">Feedback</p>
+          <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Good range. &quot;Productive&quot; used well in context.</p>
+        </div>
+      </div>
+    
+      <div style="margin-top: 32px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+        <h3 style="color: #0f172a; font-size: 15px; margin: 0 0 10px 0; font-weight: 600;">Overall Comments</h3>
+        <p style="margin: 0; color: #1e293b; font-size: 14px; line-height: 1.65; white-space: pre-wrap;">Steady week — keep building on this momentum.</p>
+      </div>
+    
+      <p style="margin-top: 32px; font-size: 13px; color: #64748b; line-height: 1.6; white-space: pre-wrap;">Keep up the great work!
+
+Best,
+Mr. Carr</p>
+    </div>
+  "
+`;

@@ -1,0 +1,55 @@
+{
+  "fixtureType": "legacy_flat_entry_bridge",
+  "description": "Sanitized example of the current flat-entry bridge model for migration planning and legacy export compatibility.",
+  "legacyEntryDocumentPath": "users/demo_owner/entries/page_demo_ai_001_week1-spring20",
+  "legacyEntry": {
+    "entryId": "page_demo_ai_001_week1-spring20",
+    "pageId": "page_demo_ai_001",
+    "pageTitle": "Student 014 - legacy diary sample",
+    "classId": "class_demo_english_b",
+    "diaryGroupId": "group_demo_10_16",
+    "diaryGroupName": "Diary Group A",
+    "studentName": "Student 014",
+    "studentGraphId": "graph_demo_student_014",
+    "studentUpn": "student014@example.edu",
+    "date": "Spring 20",
+    "weekNumber": "1",
+    "weather": "rain",
+    "diaryText": "We played traditional games during physical education, and stilt walking was the most memorable activity for me.",
+    "teacherFeedback": {},
+    "peerFeedback": [
+      {
+        "contributor": "Peer A",
+        "feedback": "That looks difficult but fun."
+      }
+    ],
+    "vocabItems": [
+      {
+        "wordOrPhrase": "physical education"
+      }
+    ],
+    "translations": [
+      {
+        "japanese": "体育",
+        "englishDefinition": "physical education",
+        "englishExample": ""
+      }
+    ],
+    "photoCount": 1,
+    "chatbotFeedback": {
+      "present": false,
+      "data": ""
+    },
+    "status": "approved",
+    "parserMode": "ai",
+    "templateVersion": "legacy-ai",
+    "oneNoteLastModified": "2026-03-31T04:05:00.000Z",
+    "approvedAt": "2026-03-31T04:20:00.000Z",
+    "updatedAt": "2026-03-31T04:20:00.000Z"
+  },
+  "migrationTarget": {
+    "pageDocPath": "users/demo_owner/classes/class_demo_english_b/pages/page_demo_ai_001",
+    "snapshotDocPath": "users/demo_owner/classes/class_demo_english_b/pages/page_demo_ai_001/snapshots/snapshot_demo_ai_2026_03_31",
+    "entryDocPath": "users/demo_owner/classes/class_demo_english_b/pages/page_demo_ai_001/snapshots/snapshot_demo_ai_2026_03_31/entries/entry_1"
+  }
+}

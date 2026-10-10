@@ -1,0 +1,5 @@
+{
+  "name": "OneNote Class Notebook Journal Exporter 2",
+  "description": "Extracts and analyzes student journal entries from OneNote Class Notebooks using Microsoft Graph and Gemini AI. Parses 3x3 table structures and exports to CSV, XLSX, or JSON.",
+  "requestFramePermissions": []
+}

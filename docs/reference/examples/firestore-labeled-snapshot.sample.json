@@ -1,0 +1,191 @@
+{
+  "fixtureType": "labeled_snapshot_bundle",
+  "description": "Sanitized snapshot-model example derived from a canonical labeled diary template with explicit field labels and three structured entries.",
+  "sourceCharacteristics": {
+    "parserMode": "label-first",
+    "templateVersion": "labeled-diary-v1",
+    "entryCount": 3,
+    "hasExplicitEntryBoundaries": true,
+    "hasPhotos": true,
+    "hasPeerFeedback": true,
+    "hasVocabularyAndTranslations": true
+  },
+  "page": {
+    "pageId": "page_demo_labeled_001",
+    "classId": "class_demo_english_b",
+    "pageTitle": "Student 001 - labeled diary sample",
+    "studentName": "Student 001",
+    "studentGraphId": "graph_demo_student_001",
+    "studentUpn": "student001@example.edu",
+    "diaryGroupId": "group_demo_10_16",
+    "diaryGroupName": "Diary Group A",
+    "syncState": "saved",
+    "parserMode": "label-first",
+    "templateVersion": "labeled-diary-v1",
+    "currentSnapshotId": "snapshot_demo_labeled_2026_03_31",
+    "approvedSnapshotId": "snapshot_demo_labeled_2026_03_31",
+    "currentOneNoteLastModified": "2026-03-31T03:15:00.000Z",
+    "lastParsedAt": "2026-03-31T03:18:12.000Z",
+    "lastViewedAt": "2026-03-31T03:19:40.000Z",
+    "updatedAt": "2026-03-31T03:19:40.000Z"
+  },
+  "snapshot": {
+    "snapshotId": "snapshot_demo_labeled_2026_03_31",
+    "pageId": "page_demo_labeled_001",
+    "classId": "class_demo_english_b",
+    "source": "label-first",
+    "parserMode": "label-first",
+    "templateVersion": "labeled-diary-v1",
+    "parserVersion": "labeled-diary-v1.0",
+    "statusSummary": "approved",
+    "stale": false,
+    "parseFallbackUsed": false,
+    "oneNoteLastModified": "2026-03-31T03:15:00.000Z",
+    "rawHtmlHash": "sha256_demo_labeled_page",
+    "entryCount": 3,
+    "createdAt": "2026-03-31T03:18:12.000Z",
+    "createdBy": "teacher_demo_owner"
+  },
+  "entries": [
+    {
+      "entryId": "entry_1",
+      "snapshotId": "snapshot_demo_labeled_2026_03_31",
+      "pageId": "page_demo_labeled_001",
+      "classId": "class_demo_english_b",
+      "date": "April 21",
+      "weekNumber": "1",
+      "weather": "Sunny and 17",
+      "photoCount": 1,
+      "diaryText": "I got home after work and rewatched an action movie I like. I often replay the soundtrack when I have free time and I want to watch the film again on my next holiday.",
+      "peerFeedback": [
+        {
+          "contributor": "Peer A",
+          "feedback": "It sounds like you really enjoy that series."
+        },
+        {
+          "contributor": "Peer B",
+          "feedback": "Now I want to watch it too."
+        },
+        {
+          "contributor": "Peer C",
+          "feedback": "Please tell us more about your favorite scene next time."
+        }
+      ],
+      "vocabItems": [
+        {
+          "wordOrPhrase": "action film"
+        },
+        {
+          "wordOrPhrase": "soundtrack"
+        }
+      ],
+      "translations": [
+        {
+          "japanese": "映画シリーズ",
+          "englishDefinition": "film series",
+          "englishExample": ""
+        },
+        {
+          "japanese": "挿入歌",
+          "englishDefinition": "insert song",
+          "englishExample": ""
+        }
+      ],
+      "chatbotFeedback": {
+        "present": true,
+        "data": "Good topic choice. Add a specific reason why this movie stays memorable for you."
+      },
+      "teacherFeedback": {
+        "diaryText": "Try adding one sentence about your favorite character or scene."
+      },
+      "status": "approved",
+      "approvedAt": "2026-03-31T03:20:00.000Z",
+      "updatedAt": "2026-03-31T03:20:00.000Z"
+    },
+    {
+      "entryId": "entry_2",
+      "snapshotId": "snapshot_demo_labeled_2026_03_31",
+      "pageId": "page_demo_labeled_001",
+      "classId": "class_demo_english_b",
+      "date": "April 28",
+      "weekNumber": "2",
+      "weather": "Cloudy",
+      "photoCount": 0,
+      "diaryText": "I spent the afternoon at a cafe and talked with a friend about summer plans. We compared places we want to visit and stayed longer than expected.",
+      "peerFeedback": [
+        {
+          "contributor": "Peer A",
+          "feedback": "That sounds relaxing."
+        }
+      ],
+      "vocabItems": [
+        {
+          "wordOrPhrase": "afternoon"
+        },
+        {
+          "wordOrPhrase": "summer plans"
+        }
+      ],
+      "translations": [
+        {
+          "japanese": "午後",
+          "englishDefinition": "afternoon",
+          "englishExample": ""
+        }
+      ],
+      "chatbotFeedback": {
+        "present": false,
+        "data": ""
+      },
+      "teacherFeedback": {},
+      "status": "approved",
+      "approvedAt": "2026-03-31T03:20:00.000Z",
+      "updatedAt": "2026-03-31T03:20:00.000Z"
+    },
+    {
+      "entryId": "entry_3",
+      "snapshotId": "snapshot_demo_labeled_2026_03_31",
+      "pageId": "page_demo_labeled_001",
+      "classId": "class_demo_english_b",
+      "date": "May 5",
+      "weekNumber": "3",
+      "weather": "Rainy",
+      "photoCount": 2,
+      "diaryText": "I visited a local event, took photos, and wrote down two new expressions I heard there. The weather was not ideal, but the trip was still worth it.",
+      "peerFeedback": [
+        {
+          "contributor": "Peer B",
+          "feedback": "The photos make the story easier to imagine."
+        }
+      ],
+      "vocabItems": [
+        {
+          "wordOrPhrase": "local event"
+        },
+        {
+          "wordOrPhrase": "worth it"
+        }
+      ],
+      "translations": [
+        {
+          "japanese": "地元の催し",
+          "englishDefinition": "local event",
+          "englishExample": ""
+        },
+        {
+          "japanese": "価値がある",
+          "englishDefinition": "worth it",
+          "englishExample": ""
+        }
+      ],
+      "chatbotFeedback": {
+        "present": true,
+        "data": "Nice use of contrast between the weather and the experience."
+      },
+      "teacherFeedback": {},
+      "status": "approved",
+      "approvedAt": "2026-03-31T03:20:00.000Z",
+      "updatedAt": "2026-03-31T03:20:00.000Z"
+    }
+  ]
+}

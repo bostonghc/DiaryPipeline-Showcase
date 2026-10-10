@@ -1,0 +1,531 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required, immutable, max 1000) - The Firebase Auth UID
+    //   - email: string (required, max 1000) - The user's email address
+    //   - role: string (required) - 'admin' or 'teacher'
+    //   - createdAt: string (required, immutable) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/roster
+    // Document ID: {classId}
+    // Fields:
+    //   - classId: string (required, immutable, max 1000) - Microsoft Graph ID
+    //   - displayName: string (required, max 1000) - Name of the class
+    //   - description: string (optional, max 1000) - Description of the class
+    //   - addedAt: string (required, immutable) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/classes
+    // Document ID: {classId}
+    // Fields:
+    //   - classId: string (required, immutable, max 1000) - Microsoft Graph ID
+    //   - displayName: string (required, max 1000) - Name of the class
+    //   - description: string (optional, max 1000) - Description of the class
+    //   - parserMode: string (required) - 'ai' or 'label-first'
+    //   - templateVersion: string (required) - 'legacy-ai' or 'labeled-diary-v1'
+    //   - lastSynced: string (optional) - ISO 8601 date string
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/classes/{classId}/students
+    // Document ID: {graphId}
+    // Fields:
+    //   - classId: string (required, immutable, max 1000) - Parent class ID
+    //   - graphId: string (required, immutable, max 1000) - Stable Microsoft directory ID
+    //   - displayName: string (required, max 1000) - Directory display name
+    //   - upn: string (required, max 1000) - Student user principal name
+    //   - mail: string (optional, max 1000) - Student email if different from UPN
+    //   - studentNumber: string (optional, max 1000) - Extracted institutional student number
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/entries
+    // Document ID: {entryId}
+    // Fields:
+    //   - entryId: string (required, immutable, max 1000) - Unique ID
+    //   - pageId: string (required, immutable, max 1000) - Microsoft Graph ID
+    //   - pageTitle: string (optional, max 1000) - OneNote page title
+    //   - classId: string (required, immutable, max 1000) - Class ID
+    //   - diaryGroupId: string (optional, max 1000) - Collaboration-space diary group ID
+    //   - diaryGroupName: string (optional, max 1000) - Collaboration-space diary group name
+    //   - studentName: string (required, max 1000) - Name of student
+    //   - studentGraphId: string (optional, max 1000) - Stable Microsoft directory ID
+    //   - studentUpn: string (optional, max 1000) - Student user principal name
+    //   - date: string (optional, max 1000) - Date of entry
+    //   - weekNumber: string (optional, max 1000) - Week number of entry
+    //   - weather: string (optional, max 1000) - Weather
+    //   - diaryTextOriginal: string (optional, max 500000) - Parsed original text only
+    //   - diaryTextCorrected: string (optional, max 500000) - Corrected text
+    //   - teacherFeedback: string (optional, max 500000) - JSON-encoded structured feedback
+    //   - peerFeedback: string (optional, max 500000) - JSON-encoded peer feedback
+    //   - translations: string (optional, max 500000) - JSON-encoded translations
+    //   - vocabCount: number (optional, -10000 to 10000) - Vocab count
+    //   - sentiment: string (optional, max 1000) - Sentiment
+    //   - topics: string (optional, max 500000) - JSON-encoded topics
+    //   - vocabItems: string (optional, max 500000) - JSON-encoded vocabulary items
+    //   - photoCount: number (optional) - Number of photos
+    //   - translationCount: number (optional) - Number of translation items
+    //   - chatbotFeedback: string (optional, max 500000) - JSON-encoded chatbot metadata
+    //   - status: string (required) - 'draft', 'reviewed', 'approved'
+    //   - parserMode: string (required) - 'ai' or 'label-first'
+    //   - templateVersion: string (required) - 'legacy-ai' or 'labeled-diary-v1'
+    //   - oneNoteLastModified: string (optional) - ISO 8601 date string
+    //   - approvedAt: string (optional) - ISO 8601 date string
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/pages
+    // Document ID: {pageId}
+    // Fields:
+    //   - pageId: string (required, immutable, max 1000) - Microsoft Graph page ID
+    //   - classId: string (required, immutable, max 1000) - Class ID
+    //   - pageTitle: string (optional, max 1000) - OneNote page title
+    //   - studentName: string (optional, max 1000) - Student name
+    //   - diaryGroupId: string (optional, max 1000) - Collaboration-space diary group ID
+    //   - diaryGroupName: string (optional, max 1000) - Collaboration-space diary group name
+    //   - studentGraphId: string (optional, max 1000) - Stable Microsoft directory ID
+    //   - studentUpn: string (optional, max 1000) - Student user principal name
+    //   - parserMode: string (required) - 'ai' or 'label-first'
+    //   - templateVersion: string (required) - 'legacy-ai' or 'labeled-diary-v1'
+    //   - syncState: string (required) - 'idle', 'syncing', 'saved', 'rate_limited', or 'error'
+    //   - entryCount: number (optional) - Number of saved entries
+    //   - oneNoteLastModified: string (optional) - ISO 8601 date string
+    //   - lastParsedAt: string (optional) - ISO 8601 date string
+    //   - lastViewedAt: string (optional) - ISO 8601 date string
+    //   - lastError: string (optional, max 500000) - Last sync/parse error
+    //   - nextRetryAt: string (optional) - ISO 8601 date string
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/syncJobs/{jobId}
+    // Fields:
+    //   - jobId: string (required) - Auto-generated Firestore document ID
+    //   - classId: string (required, max 1000) - The class being synced
+    //   - classDisplayName: string (required, max 1000) - Display name for UI
+    //   - status: string (required) - 'populating', 'running', 'done', or 'cancelled'
+    //   - counts: map (required) - { total, queued, running, done, skipped, error, rate_limited }
+    //   - createdAt: string (required) - ISO 8601 date string
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //   - completedAt: string (optional) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/syncJobs/{jobId}/items/{itemId}
+    // Document ID: deterministic ${sanitizedClassId}__${sanitizedPageId}
+    // Fields:
+    //   - itemId: string (required) - Matches document ID
+    //   - jobId: string (required) - Parent job ID
+    //   - classId: string (required, max 1000) - Class ID
+    //   - pageId: string (required, max 1000) - Graph page ID
+    //   - pageTitle: string (required, max 1000) - OneNote page display name
+    //   - studentName: string (required, max 1000) - Section display name
+    //   - diaryGroupId: string (required, max 1000) - Section/diary group ID
+    //   - diaryGroupName: string (required, max 1000) - Section/diary group display name
+    //   - studentGraphId: string (optional, max 1000)
+    //   - studentUpn: string (optional, max 1000)
+    //   - parserMode: string (required) - 'ai' or 'label-first'
+    //   - templateVersion: string (required) - 'legacy-ai' or 'labeled-diary-v1'
+    //   - oneNoteLastModified: string (optional) - ISO 8601 date string
+    //   - status: string (required) - 'queued', 'running', 'done', 'skipped', 'error', 'rate_limited'
+    //   - runId: string (optional) - UUID of the worker that claimed this item
+    //   - claimedAt: string (optional) - ISO 8601 date string
+    //   - heartbeatAt: string (optional) - ISO 8601 date string
+    //   - lastError: string (optional, max 500000)
+    //   - nextRetryAt: string (optional) - ISO 8601 date string
+    //   - createdAt: string (required) - ISO 8601 date string
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //
+    // Note: raw OneNote HTML is intentionally not persisted in Firestore.
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (
+          (request.auth.token.email == "ghcarr@gmail.com" && request.auth.token.email_verified == true) ||
+          (
+            exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+          )
+        );
+    }
+
+    match /test/connection {
+      allow read: if true;
+    }
+
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.size() >= 10 && dateStr.size() <= 120;
+    }
+
+    function isValidOptionalString(data, field, minLen, maxLen) {
+      return !(field in data) ||
+             (data[field] is string &&
+              data[field].size() >= minLen &&
+              data[field].size() <= maxLen);
+    }
+
+    function isValidOptionalNumber(data, field, minVal, maxVal) {
+      return !(field in data) ||
+             (data[field] is number &&
+              data[field] >= minVal &&
+              data[field] <= maxVal);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['uid', 'email', 'role', 'createdAt']) &&
+             data.uid is string && data.uid.size() > 0 && data.uid.size() < 1000 &&
+             data.email is string && isValidEmail(data.email) && data.email.size() < 1000 &&
+             data.role in ['admin', 'teacher'] &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidRosterClass(data) {
+      return hasOnlyAllowedFields(['classId', 'displayName', 'description', 'addedAt']) &&
+             data.classId is string && data.classId.size() > 0 && data.classId.size() < 1000 &&
+             data.displayName is string && data.displayName.size() > 0 && data.displayName.size() < 1000 &&
+             isValidOptionalString(data, 'description', 0, 1000) &&
+             isValidDateString(data.addedAt);
+    }
+
+    function isValidClassMetadata(data, classId) {
+      return hasOnlyAllowedFields([
+               'classId', 'displayName', 'description', 'parserMode',
+               'templateVersion', 'lastSynced', 'updatedAt'
+             ]) &&
+             data.classId is string && data.classId == classId && data.classId.size() > 0 && data.classId.size() < 1000 &&
+             data.displayName is string && data.displayName.size() > 0 && data.displayName.size() < 1000 &&
+             isValidOptionalString(data, 'description', 0, 1000) &&
+             data.parserMode in ['ai', 'label-first'] &&
+             data.templateVersion in ['legacy-ai', 'labeled-diary-v1'] &&
+             isValidOptionalString(data, 'lastSynced', 0, 500) &&
+             isValidDateString(data.updatedAt);
+    }
+
+    function isValidClassStudentIdentity(data, classId, graphId) {
+      return hasOnlyAllowedFields([
+               'classId', 'graphId', 'displayName', 'upn', 'mail', 'studentNumber', 'updatedAt'
+             ]) &&
+             data.classId is string && data.classId == classId && data.classId.size() > 0 && data.classId.size() < 1000 &&
+             data.graphId is string && data.graphId == graphId && data.graphId.size() > 0 && data.graphId.size() < 1000 &&
+             data.displayName is string && data.displayName.size() > 0 && data.displayName.size() < 1000 &&
+             data.upn is string && data.upn.size() > 0 && data.upn.size() < 1000 &&
+             isValidOptionalString(data, 'mail', 0, 1000) &&
+             isValidOptionalString(data, 'studentNumber', 0, 1000) &&
+             isValidDateString(data.updatedAt);
+    }
+
+    function isValidJournalEntry(data, entryId) {
+      return hasOnlyAllowedFields([
+               'entryId', 'pageId', 'pageTitle', 'classId', 'diaryGroupId', 'diaryGroupName', 'studentName', 'studentGraphId', 'studentUpn', 'date', 'weekNumber', 'weather',
+               'diaryTextOriginal', 'diaryTextCorrected', 'teacherFeedback',
+               'peerFeedback', 'translations', 'vocabCount', 'sentiment', 'topics', 'status',
+               'oneNoteLastModified', 'approvedAt', 'updatedAt',
+               'vocabItems', 'photoCount', 'translationCount', 'chatbotFeedback',
+               'parserMode', 'templateVersion', 'parseWarnings', 'rawText'
+             ]) &&
+             data.entryId is string && data.entryId == entryId && data.entryId.size() > 0 &&
+             data.pageId is string && data.pageId.size() < 1000 &&
+             isValidOptionalString(data, 'pageTitle', 0, 1000) &&
+             data.classId is string && data.classId.size() < 1000 &&
+             isValidOptionalString(data, 'diaryGroupId', 0, 1000) &&
+             isValidOptionalString(data, 'diaryGroupName', 0, 1000) &&
+             data.studentName is string && data.studentName.size() < 1000 &&
+             isValidOptionalString(data, 'studentGraphId', 0, 1000) &&
+             isValidOptionalString(data, 'studentUpn', 0, 1000) &&
+             isValidOptionalString(data, 'date', 0, 2000) &&
+             isValidOptionalString(data, 'weekNumber', 0, 1000) &&
+             isValidOptionalString(data, 'weather', 0, 1000) &&
+             isValidOptionalString(data, 'diaryTextOriginal', 0, 500000) &&
+             isValidOptionalString(data, 'diaryTextCorrected', 0, 500000) &&
+             isValidOptionalString(data, 'teacherFeedback', 0, 500000) &&
+             isValidOptionalString(data, 'peerFeedback', 0, 500000) &&
+             isValidOptionalString(data, 'translations', 0, 500000) &&
+             isValidOptionalNumber(data, 'vocabCount', -1000000, 1000000) &&
+             isValidOptionalString(data, 'sentiment', 0, 2000) &&
+             isValidOptionalString(data, 'topics', 0, 500000) &&
+             isValidOptionalString(data, 'vocabItems', 0, 500000) &&
+             isValidOptionalNumber(data, 'photoCount', -1000000, 1000000) &&
+             isValidOptionalNumber(data, 'translationCount', -1000000, 1000000) &&
+             isValidOptionalString(data, 'chatbotFeedback', 0, 500000) &&
+             isValidOptionalString(data, 'parseWarnings', 0, 500000) &&
+             isValidOptionalString(data, 'rawText', 0, 500000) &&
+             data.status in ['draft', 'reviewed', 'approved'] &&
+             data.parserMode in ['ai', 'label-first'] &&
+             data.templateVersion in ['legacy-ai', 'labeled-diary-v1'] &&
+             isValidOptionalString(data, 'oneNoteLastModified', 0, 500) &&
+             isValidOptionalString(data, 'approvedAt', 0, 500) &&
+             isValidDateString(data.updatedAt);
+    }
+
+    function isValidPageSyncRecord(data, pageId) {
+      return hasOnlyAllowedFields([
+               'pageId', 'classId', 'pageTitle', 'studentName', 'diaryGroupId', 'diaryGroupName', 'studentGraphId', 'studentUpn', 'parserMode', 'templateVersion',
+               'syncState', 'entryCount', 'oneNoteLastModified', 'lastParsedAt', 'lastViewedAt',
+               'lastError', 'nextRetryAt', 'updatedAt'
+             ]) &&
+             data.pageId is string && data.pageId == pageId && data.pageId.size() > 0 && data.pageId.size() < 1000 &&
+             data.classId is string && data.classId.size() > 0 && data.classId.size() < 1000 &&
+             isValidOptionalString(data, 'pageTitle', 0, 1000) &&
+             isValidOptionalString(data, 'studentName', 0, 1000) &&
+             isValidOptionalString(data, 'diaryGroupId', 0, 1000) &&
+             isValidOptionalString(data, 'diaryGroupName', 0, 1000) &&
+             isValidOptionalString(data, 'studentGraphId', 0, 1000) &&
+             isValidOptionalString(data, 'studentUpn', 0, 1000) &&
+             data.parserMode in ['ai', 'label-first'] &&
+             data.templateVersion in ['legacy-ai', 'labeled-diary-v1'] &&
+             data.syncState in ['idle', 'syncing', 'saved', 'rate_limited', 'error'] &&
+             isValidOptionalNumber(data, 'entryCount', 0, 1000000) &&
+             isValidOptionalString(data, 'oneNoteLastModified', 0, 500) &&
+             isValidOptionalString(data, 'lastParsedAt', 0, 500) &&
+             isValidOptionalString(data, 'lastViewedAt', 0, 500) &&
+             isValidOptionalString(data, 'lastError', 0, 500000) &&
+             isValidOptionalString(data, 'nextRetryAt', 0, 500) &&
+             isValidDateString(data.updatedAt);
+    }
+
+    function isValidFeedbackHistoryRecord(data, feedbackId) {
+      return hasOnlyAllowedFields([
+               'feedbackId', 'classId', 'pageId', 'entryId',
+               'studentUpn', 'studentName', 'studentGraphId',
+               'channel', 'sentAt', 'batchId', 'source', 'fieldsAddressed', 'content', 'updatedAt',
+               // Slice 6 schema additions (optional on write; legacy
+               // records lack them and default at read time):
+               'formatVersion', 'structuredFeedback', 'entrySnapshot',
+               // Analytics-event metadata (optional; captured at send time):
+               'uptakeObservedAt', 'itemCountSetting', 'priorFeedbackMode',
+               'recipientResolutionSource'
+             ]) &&
+             data.feedbackId is string && data.feedbackId == feedbackId && data.feedbackId.size() > 0 && data.feedbackId.size() < 1000 &&
+             data.classId is string && data.classId.size() > 0 && data.classId.size() < 1000 &&
+             data.pageId is string && data.pageId.size() > 0 && data.pageId.size() < 1000 &&
+             data.entryId is string && data.entryId.size() > 0 && data.entryId.size() < 1000 &&
+             data.studentUpn is string && data.studentUpn.size() > 0 && data.studentUpn.size() < 1000 &&
+             data.studentName is string && data.studentName.size() > 0 && data.studentName.size() < 1000 &&
+             isValidOptionalString(data, 'studentGraphId', 0, 1000) &&
+             isValidOptionalString(data, 'batchId', 0, 1000) &&
+             data.channel in ['teams', 'email'] &&
+             isValidDateString(data.sentAt) &&
+             data.source in ['human', 'ai_drafted', 'ai_drafted_human_edited', 'hybrid'] &&
+             data.fieldsAddressed is list &&
+             data.content is string && data.content.size() >= 0 && data.content.size() < 500000 &&
+             isValidDateString(data.updatedAt) &&
+             isValidOptionalNumber(data, 'formatVersion', 1, 9999) &&
+             (!('structuredFeedback' in data) || data.structuredFeedback is map) &&
+             (!('entrySnapshot' in data) || data.entrySnapshot is map) &&
+             (!('itemCountSetting' in data) || data.itemCountSetting in ['1-2', '3-4', '5+']) &&
+             (!('priorFeedbackMode' in data) || data.priorFeedbackMode in ['off', 'reference', 'include']) &&
+             (!('recipientResolutionSource' in data) || data.recipientResolutionSource in ['roster', 'graph_search', 'manual']) &&
+             (!('uptakeObservedAt' in data) || data.uptakeObservedAt == null || isValidDateString(data.uptakeObservedAt));
+    }
+
+    function isValidFeedbackReviewDecisionRecord(data, decisionId) {
+      return hasOnlyAllowedFields([
+               'decisionId', 'batchId', 'classId', 'pageId', 'entryId',
+               'studentUpn', 'studentName', 'studentGraphId',
+               'decision', 'decidedAt', 'updatedAt'
+             ]) &&
+             data.decisionId is string && data.decisionId == decisionId && data.decisionId.size() > 0 && data.decisionId.size() < 1000 &&
+             isValidOptionalString(data, 'batchId', 0, 1000) &&
+             data.classId is string && data.classId.size() > 0 && data.classId.size() < 1000 &&
+             data.pageId is string && data.pageId.size() > 0 && data.pageId.size() < 1000 &&
+             data.entryId is string && data.entryId.size() > 0 && data.entryId.size() < 1000 &&
+             data.studentUpn is string && data.studentUpn.size() > 0 && data.studentUpn.size() < 1000 &&
+             data.studentName is string && data.studentName.size() > 0 && data.studentName.size() < 1000 &&
+             isValidOptionalString(data, 'studentGraphId', 0, 1000) &&
+             data.decision in ['reviewed_no_feedback'] &&
+             isValidDateString(data.decidedAt) &&
+             isValidDateString(data.updatedAt);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      
+      allow create: if isOwner(userId) && 
+                    hasRequiredFields(['uid', 'email', 'role', 'createdAt']) &&
+                    isValidUser(request.resource.data) && 
+                    uidUnchanged() && 
+                    ((request.resource.data.role == 'teacher') || isAdmin());
+                    
+      allow update: if isOwner(userId) && 
+                    isValidUser(request.resource.data) && 
+                    uidNotModified() && 
+                    areImmutableFieldsUnchanged(['createdAt']) &&
+                    ((request.resource.data.role == resource.data.role) || isAdmin());
+                    
+      allow delete: if isAdmin();
+
+      match /roster/{classId} {
+        allow read: if isOwner(userId) || isAdmin();
+        
+        allow create: if isOwner(userId) &&
+                      hasRequiredFields(['classId', 'displayName', 'addedAt']) &&
+                      isValidRosterClass(request.resource.data);
+                      
+        allow update: if isOwner(userId) &&
+                      isValidRosterClass(request.resource.data) &&
+                      areImmutableFieldsUnchanged(['classId', 'addedAt']);
+                      
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /classes/{classId} {
+        allow read: if isOwner(userId) || isAdmin();
+
+        allow create: if isOwner(userId) &&
+                      hasRequiredFields(['classId', 'displayName', 'parserMode', 'templateVersion', 'updatedAt']) &&
+                      isValidClassMetadata(request.resource.data, classId);
+
+        allow update: if isOwner(userId) &&
+                      isValidClassMetadata(request.resource.data, classId) &&
+                      areImmutableFieldsUnchanged(['classId']);
+
+        allow delete: if isOwner(userId) || isAdmin();
+
+        match /students/{graphId} {
+          allow read: if isOwner(userId) || isAdmin();
+
+          allow create: if isOwner(userId) &&
+                        hasRequiredFields(['classId', 'graphId', 'displayName', 'upn', 'updatedAt']) &&
+                        isValidClassStudentIdentity(request.resource.data, classId, graphId);
+
+          allow update: if isOwner(userId) &&
+                        isValidClassStudentIdentity(request.resource.data, classId, graphId) &&
+                        areImmutableFieldsUnchanged(['classId', 'graphId']);
+
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+      }
+
+      match /entries/{entryId} {
+        allow read: if isOwner(userId) || isAdmin();
+        
+        allow create: if (isOwner(userId) || isAdmin()) &&
+                      hasRequiredFields(['entryId', 'pageId', 'classId', 'studentName', 'status', 'parserMode', 'templateVersion', 'updatedAt']) &&
+                      isValidJournalEntry(request.resource.data, entryId);
+                      
+        allow update: if (isOwner(userId) || isAdmin()) &&
+                      isValidJournalEntry(request.resource.data, entryId) &&
+                      (isAdmin() || areImmutableFieldsUnchanged(['entryId', 'pageId', 'classId']));
+                      
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      match /pages/{pageId} {
+        allow read: if isOwner(userId) || isAdmin();
+
+        allow create: if isOwner(userId) &&
+                      hasRequiredFields(['pageId', 'classId', 'parserMode', 'templateVersion', 'syncState', 'updatedAt']) &&
+                      isValidPageSyncRecord(request.resource.data, pageId);
+
+        allow update: if isOwner(userId) &&
+                      isValidPageSyncRecord(request.resource.data, pageId) &&
+                      areImmutableFieldsUnchanged(['pageId', 'classId']);
+
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      // Append-only history of feedback messages actually sent to students.
+      // Records are immutable after write (audit trail); only admins may delete.
+      // Exception: owner may update uptakeObservedAt (teacher-marked uptake toggle).
+      match /feedbackHistory/{feedbackId} {
+        allow read: if isOwner(userId) || isAdmin();
+
+        allow create: if isOwner(userId) &&
+                      hasRequiredFields(['feedbackId', 'classId', 'pageId', 'entryId',
+                                         'studentUpn', 'studentName', 'channel',
+                                         'sentAt', 'source', 'fieldsAddressed', 'content', 'updatedAt']) &&
+                      isValidFeedbackHistoryRecord(request.resource.data, feedbackId);
+
+        allow update: if isAdmin() ||
+                      (isOwner(userId) &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['uptakeObservedAt']) &&
+                       (request.resource.data.uptakeObservedAt == null ||
+                        isValidDateString(request.resource.data.uptakeObservedAt)));
+
+        allow delete: if isAdmin();
+      }
+
+      // Append-only internal provenance for entries the teacher reviewed and
+      // explicitly judged as needing no student-facing feedback.
+      match /feedbackReviewDecisions/{decisionId} {
+        allow read: if isOwner(userId) || isAdmin();
+
+        allow create: if isOwner(userId) &&
+                      hasRequiredFields(['decisionId', 'classId', 'pageId', 'entryId',
+                                         'studentUpn', 'studentName', 'decision',
+                                         'decidedAt', 'updatedAt']) &&
+                      isValidFeedbackReviewDecisionRecord(request.resource.data, decisionId);
+
+        allow update, delete: if isAdmin();
+      }
+
+      // Teacher preferences — pedagogical and AI model settings that travel
+      // with the teacher's profile across devices. No strict field validation
+      // since the schema evolves with each slice. Owner read/write only.
+      match /preferences/{preferenceId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if isOwner(userId);
+      }
+
+      // Durable sync queue. Jobs and items are operational scheduling records —
+      // no strict field validation; schema will evolve as the queue matures.
+      // Owner read/write only; admins can read for debugging.
+      match /syncJobs/{jobId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if isOwner(userId);
+
+        match /items/{itemId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow write: if isOwner(userId);
+        }
+      }
+    }
+  }
+}

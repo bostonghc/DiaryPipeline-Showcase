@@ -1,0 +1,180 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A teacher using the application.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the user (max 1000 chars)."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "The user's email address (max 1000 chars)."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "teacher"],
+          "description": "The user's role."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the user profile was created."
+        }
+      },
+      "required": ["uid", "email", "role", "createdAt"]
+    },
+    "RosterClass": {
+      "title": "RosterClass",
+      "description": "A class notebook saved to the teacher's active roster.",
+      "type": "object",
+      "properties": {
+        "classId": {
+          "type": "string",
+          "description": "The Microsoft Graph ID of the class or notebook (max 1000 chars)."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The name of the class (max 1000 chars)."
+        },
+        "description": {
+          "type": "string",
+          "description": "The description of the class (max 1000 chars)."
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the class was added to the roster."
+        }
+      },
+      "required": ["classId", "displayName", "addedAt"]
+    },
+    "JournalEntry": {
+      "title": "JournalEntry",
+      "description": "A parsed and potentially edited student journal entry.",
+      "type": "object",
+      "properties": {
+        "entryId": {
+          "type": "string",
+          "description": "A unique ID for this entry, typically combining pageId and an index (max 1000 chars)."
+        },
+        "pageId": {
+          "type": "string",
+          "description": "The Microsoft Graph ID of the OneNote page (max 1000 chars)."
+        },
+        "classId": {
+          "type": "string",
+          "description": "The ID of the class this entry belongs to (max 1000 chars)."
+        },
+        "studentName": {
+          "type": "string",
+          "description": "The name of the student (max 1000 chars)."
+        },
+        "date": {
+          "type": "string",
+          "description": "The date of the journal entry (max 1000 chars)."
+        },
+        "weekNumber": {
+          "type": "string",
+          "description": "The week number of the journal entry (max 1000 chars)."
+        },
+        "weather": {
+          "type": "string",
+          "description": "The weather recorded in the entry (max 1000 chars)."
+        },
+        "diaryTextOriginal": {
+          "type": "string",
+          "description": "The original text written by the student (max 100000 chars)."
+        },
+        "diaryTextCorrected": {
+          "type": "string",
+          "description": "The AI-corrected or teacher-edited text (max 100000 chars)."
+        },
+        "teacherFeedback": {
+          "type": "string",
+          "description": "The feedback drafted by AI or written by the teacher (max 50000 chars)."
+        },
+        "peerFeedback": {
+          "type": "string",
+          "description": "Feedback received from peers (max 50000 chars)."
+        },
+        "translations": {
+          "type": "string",
+          "description": "Translations included in the entry (max 50000 chars)."
+        },
+        "vocabCount": {
+          "type": "number",
+          "description": "The number of vocabulary words used (-10000 to 10000)."
+        },
+        "sentiment": {
+          "type": "string",
+          "description": "The sentiment of the entry (max 1000 chars)."
+        },
+        "topics": {
+          "type": "string",
+          "description": "The topics covered in the entry (max 50000 chars)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "reviewed", "approved"],
+          "description": "The workflow status of this entry."
+        },
+        "oneNoteLastModified": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The last modified date of the page in OneNote."
+        },
+        "approvedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the teacher approved this entry."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When this record was last updated in Firestore."
+        },
+        "vocabItems": {
+          "type": "string",
+          "description": "The vocabulary items used in the entry (max 500000 chars)."
+        },
+        "photoCount": {
+          "type": "number",
+          "description": "The number of photos in the entry (-1000000 to 1000000)."
+        },
+        "translationCount": {
+          "type": "number",
+          "description": "The number of translations in the entry (-1000000 to 1000000)."
+        },
+        "chatbotFeedback": {
+          "type": "string",
+          "description": "The chatbot feedback for the entry (max 500000 chars)."
+        }
+      },
+      "required": ["entryId", "pageId", "classId", "studentName", "status", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/User"
+      },
+      "description": "Stores teacher profiles."
+    },
+    "/users/{userId}/roster/{classId}": {
+      "schema": {
+        "$ref": "#/entities/RosterClass"
+      },
+      "description": "Stores the active roster of classes for a teacher."
+    },
+    "/users/{userId}/entries/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/JournalEntry"
+      },
+      "description": "Stores the parsed and edited journal entries for a teacher."
+    }
+  }
+}

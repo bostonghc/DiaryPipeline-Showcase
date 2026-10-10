@@ -1,0 +1,179 @@
+{
+  "fixtureType": "legacy_ai_snapshot_bundle",
+  "description": "Sanitized snapshot-model example derived from an older unlabeled table layout that requires AI parsing to map rows into diary fields.",
+  "sourceCharacteristics": {
+    "parserMode": "ai",
+    "templateVersion": "legacy-ai",
+    "entryCount": 3,
+    "usesOldTableModel": true,
+    "hasPhotos": true,
+    "hasPeerFeedback": true,
+    "hasSparseChatbotColumn": true
+  },
+  "page": {
+    "pageId": "page_demo_ai_001",
+    "classId": "class_demo_english_b",
+    "pageTitle": "Student 014 - legacy diary sample",
+    "studentName": "Student 014",
+    "studentGraphId": "graph_demo_student_014",
+    "studentUpn": "student014@example.edu",
+    "diaryGroupId": "group_demo_10_16",
+    "diaryGroupName": "Diary Group A",
+    "syncState": "saved",
+    "parserMode": "ai",
+    "templateVersion": "legacy-ai",
+    "currentSnapshotId": "snapshot_demo_ai_2026_03_31",
+    "approvedSnapshotId": "snapshot_demo_ai_2026_03_31",
+    "currentOneNoteLastModified": "2026-03-31T04:05:00.000Z",
+    "lastParsedAt": "2026-03-31T04:06:11.000Z",
+    "lastViewedAt": "2026-03-31T04:10:00.000Z",
+    "updatedAt": "2026-03-31T04:10:00.000Z"
+  },
+  "snapshot": {
+    "snapshotId": "snapshot_demo_ai_2026_03_31",
+    "pageId": "page_demo_ai_001",
+    "classId": "class_demo_english_b",
+    "source": "ai",
+    "parserMode": "ai",
+    "templateVersion": "legacy-ai",
+    "parserVersion": "gemini-legacy-ai-bridge-v1",
+    "statusSummary": "draft",
+    "stale": false,
+    "parseFallbackUsed": false,
+    "oneNoteLastModified": "2026-03-31T04:05:00.000Z",
+    "rawHtmlHash": "sha256_demo_ai_page",
+    "entryCount": 3,
+    "createdAt": "2026-03-31T04:06:11.000Z",
+    "createdBy": "teacher_demo_owner"
+  },
+  "entries": [
+    {
+      "entryId": "entry_1",
+      "snapshotId": "snapshot_demo_ai_2026_03_31",
+      "pageId": "page_demo_ai_001",
+      "classId": "class_demo_english_b",
+      "date": "Spring 20",
+      "weekNumber": "1",
+      "weather": "rain",
+      "photoCount": 1,
+      "diaryText": "We played traditional games during physical education, and stilt walking was the most memorable activity for me.",
+      "peerFeedback": [
+        {
+          "contributor": "Peer A",
+          "feedback": "That looks difficult but fun."
+        },
+        {
+          "contributor": "Peer B",
+          "feedback": "How many steps could you manage?"
+        }
+      ],
+      "vocabItems": [
+        {
+          "wordOrPhrase": "physical education"
+        }
+      ],
+      "translations": [
+        {
+          "japanese": "体育",
+          "englishDefinition": "physical education",
+          "englishExample": ""
+        }
+      ],
+      "chatbotFeedback": {
+        "present": false,
+        "data": ""
+      },
+      "teacherFeedback": {},
+      "status": "draft",
+      "updatedAt": "2026-03-31T04:06:11.000Z"
+    },
+    {
+      "entryId": "entry_2",
+      "snapshotId": "snapshot_demo_ai_2026_03_31",
+      "pageId": "page_demo_ai_001",
+      "classId": "class_demo_english_b",
+      "date": "Spring 20",
+      "weekNumber": "2",
+      "weather": "Rain",
+      "photoCount": 1,
+      "diaryText": "I went to a hot spring, ate shaved ice, stayed for a long time, and then relaxed at home while watching television.",
+      "peerFeedback": [
+        {
+          "contributor": "Peer C",
+          "feedback": "The dessert sounds delicious."
+        },
+        {
+          "contributor": "Peer D",
+          "feedback": "Five hours at a hot spring is impressive."
+        },
+        {
+          "contributor": "Peer E",
+          "feedback": "Please add a photo for every entry next time."
+        }
+      ],
+      "vocabItems": [
+        {
+          "wordOrPhrase": "hot spring"
+        },
+        {
+          "wordOrPhrase": "warm"
+        }
+      ],
+      "translations": [
+        {
+          "japanese": "温泉",
+          "englishDefinition": "hot spring",
+          "englishExample": ""
+        },
+        {
+          "japanese": "暖かい",
+          "englishDefinition": "warm",
+          "englishExample": ""
+        }
+      ],
+      "chatbotFeedback": {
+        "present": false,
+        "data": ""
+      },
+      "teacherFeedback": {
+        "diaryText": "Add one detail about where the hot spring was."
+      },
+      "status": "draft",
+      "updatedAt": "2026-03-31T04:06:11.000Z"
+    },
+    {
+      "entryId": "entry_3",
+      "snapshotId": "snapshot_demo_ai_2026_03_31",
+      "pageId": "page_demo_ai_001",
+      "classId": "class_demo_english_b",
+      "date": "Spring 28",
+      "weekNumber": "3",
+      "weather": "cloudy",
+      "photoCount": 1,
+      "diaryText": "I went to a cafe and ordered a large sandwich. It was bigger than I expected, and I want to go back again.",
+      "peerFeedback": [
+        {
+          "contributor": "Peer B",
+          "feedback": "Now I want to try that menu item."
+        },
+        {
+          "contributor": "Peer A",
+          "feedback": "It sounds filling."
+        }
+      ],
+      "vocabItems": [
+        {
+          "wordOrPhrase": "sandwich"
+        }
+      ],
+      "translations": [],
+      "chatbotFeedback": {
+        "present": false,
+        "data": ""
+      },
+      "teacherFeedback": {},
+      "status": "draft",
+      "updatedAt": "2026-03-31T04:06:11.000Z"
+    }
+  ]
+}
