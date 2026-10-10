@@ -1,5 +1,7 @@
 # DiaryPipeline
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23281910.svg)](https://doi.org/10.5281/zenodo.23281910)
+
 **A teacher-facing pipeline for collecting, reviewing and giving feedback on student diaries written in OneNote Class Notebooks, built on the Microsoft Graph API.**
 
 Many language teachers already hold a rich, longitudinal record of student writing in OneNote Class Notebooks, but it is hard to inspect, preserve, compare and act on at scale. DiaryPipeline turns a fragile weekly diary-feedback routine into a durable, inspectable workflow:
