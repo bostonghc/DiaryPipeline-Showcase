@@ -42,7 +42,7 @@ const baseEntry = (overrides: Partial<ParsedDiaryEntry> = {}): ParsedDiaryEntry 
 });
 
 const baseStructured = (overrides: Partial<StructuredFeedback> = {}): StructuredFeedback => ({
-  greeting: 'Hi Hanako,\n\nThank you for your journal entry this week!',
+  greeting: 'Hi Hina,\n\nThank you for your journal entry this week!',
   diaryFeedback: 'Strong topic sentence. Watch tense consistency in paragraph two.',
   includeDiary: true,
   vocabFeedback: 'Good range. "Productive" used well in context.',
@@ -51,7 +51,7 @@ const baseStructured = (overrides: Partial<StructuredFeedback> = {}): Structured
   includeOverall: true,
   closing: 'Keep up the great work!\n\nBest,\nMr. Carr',
   reviewNotice: 'This feedback is meant to support, not grade. Focus on one or two items at a time.',
-  studentEmail: 'ak1234567@school.edu',
+  studentEmail: 'ak1234570@school.edu',
   ...overrides,
 });
 
@@ -208,13 +208,13 @@ describe('renderFeedbackToHTML — HTML escaping (XSS safety)', () => {
 describe('renderBatchFeedbackToHTML — multi-week feedback', () => {
   it('renders selected feedback entries and excludes internal review decisions', () => {
     const week3 = baseStructured({
-      greeting: 'Hi Hanako,',
+      greeting: 'Hi Hina,',
       closing: 'Best,\nTeacher',
       diaryFeedback: 'Week 3 feedback',
       includeDiary: true,
     });
     const week4 = baseStructured({
-      greeting: 'Hi Hanako,',
+      greeting: 'Hi Hina,',
       closing: 'Best,\nTeacher',
       diaryFeedback: 'Week 4 feedback',
       includeDiary: true,
@@ -233,7 +233,7 @@ describe('renderBatchFeedbackToHTML — multi-week feedback', () => {
           entry: baseEntry({ diaryText: 'Week 4 diary' }),
         },
       ],
-      'Hi Hanako,\n\nHere is feedback for several entries.',
+      'Hi Hina,\n\nHere is feedback for several entries.',
       'Best,\nTeacher'
     );
 
@@ -259,7 +259,7 @@ describe('compileStructuredFeedback — field contract (UI-shaped teacherFeedbac
       chatbot: 'chatbot comment',
       overall: 'overall comment',
     };
-    const sf = compileStructuredFeedback('Hanako', baseEntry(), fb);
+    const sf = compileStructuredFeedback('Hina', baseEntry(), fb);
     expect([sf.diaryFeedback, sf.includeDiary]).toEqual(['diary comment', true]);
     expect([sf.vocabFeedback, sf.includeVocab]).toEqual(['vocab comment', true]);
     expect([sf.peerFeedback, sf.includePeer]).toEqual(['peer comment', true]);
@@ -269,13 +269,13 @@ describe('compileStructuredFeedback — field contract (UI-shaped teacherFeedbac
   });
 
   it('does NOT read the legacy vocabItems key (the original silent-discard bug)', () => {
-    const sf = compileStructuredFeedback('Hanako', baseEntry(), { vocabItems: 'wrong key' } as TeacherFeedbackFields);
+    const sf = compileStructuredFeedback('Hina', baseEntry(), { vocabItems: 'wrong key' } as TeacherFeedbackFields);
     expect(sf.includeVocab).toBe(false);
     expect(sf.vocabFeedback).toBe('');
   });
 
   it('omits fields the teacher left blank', () => {
-    const sf = compileStructuredFeedback('Hanako', baseEntry(), { diaryText: 'only diary' });
+    const sf = compileStructuredFeedback('Hina', baseEntry(), { diaryText: 'only diary' });
     expect(sf.includeDiary).toBe(true);
     expect(sf.includePeer).toBe(false);
     expect(sf.includeVocab).toBe(false);
@@ -291,7 +291,7 @@ describe('renderFeedbackToHTML — formatVersion 3 sections', () => {
       translations: [{ japanese: '図書館', englishDefinition: 'library', englishExample: 'I go to the library.' }],
       chatbotFeedback: { present: true, data: 'I practiced <greetings>' },
     });
-    const sf = compileStructuredFeedback('Hanako', entry, {
+    const sf = compileStructuredFeedback('Hina', entry, {
       peerFeedback: 'Good peer engagement.',
       translations: 'Watch article usage.',
       chatbot: 'Nice use of the bot.',
@@ -314,7 +314,7 @@ describe('renderFeedbackToHTML — formatVersion 3 sections', () => {
   });
 
   it('omits the new sections for a legacy v2-shaped record (only diary feedback)', () => {
-    const sf = compileStructuredFeedback('Hanako', baseEntry(), { diaryText: 'only diary' });
+    const sf = compileStructuredFeedback('Hina', baseEntry(), { diaryText: 'only diary' });
     const html = renderFeedbackToHTML(sf, baseEntry());
     expect(html).not.toContain('Peer Feedback');
     expect(html).not.toContain('Translations');
@@ -324,7 +324,7 @@ describe('renderFeedbackToHTML — formatVersion 3 sections', () => {
 
 describe('cleanStudentDisplayName', () => {
   it('strips the standard ID-prefixed tenant format', () => {
-    expect(cleanStudentDisplayName('1234570 - 山田花子')).toBe('山田花子');
+    expect(cleanStudentDisplayName('1234570 - 山田陽菜')).toBe('山田陽菜');
   });
 
   it('strips a leading en-dash separator with no ID (the "Hi –," failure mode)', () => {
@@ -340,7 +340,7 @@ describe('cleanStudentDisplayName', () => {
   });
 
   it('leaves an already-clean name untouched', () => {
-    expect(cleanStudentDisplayName('Hanako Yamada')).toBe('Hanako Yamada');
+    expect(cleanStudentDisplayName('Riko Sato')).toBe('Riko Sato');
   });
 
   it('returns empty for punctuation-only or blank input', () => {
@@ -355,7 +355,7 @@ describe('deriveGreetingFirstName', () => {
   });
 
   it('returns the whole token for a space-less Japanese name', () => {
-    expect(deriveGreetingFirstName('1234570 - 山田花子')).toBe('山田花子');
+    expect(deriveGreetingFirstName('1234570 - 山田陽菜')).toBe('山田陽菜');
   });
 
   it('falls back to "there" when the name is a bare separator', () => {
@@ -376,5 +376,28 @@ describe('compileStructuredFeedback — greeting name robustness', () => {
     const sf = compileStructuredFeedback('–', baseEntry(), { diaryText: 'x' });
     expect(sf.greeting).toMatch(/\bthere\b/);
     expect(sf.greeting).not.toContain('–');
+  });
+});
+
+describe('review notice is derived from the entry it describes', () => {
+  it('names the entry that was compiled, not another one', () => {
+    // Regression: reviewAndSend resolved the entry with find(e => e.id === id)
+    // while every other lookup used entry.id || String(index). With duplicate
+    // ids that compiled one entry's drafts against another entry's date, so a
+    // Week 6 send carried a Week 7 notice — invisible in the modal, which does
+    // not preview the notice.
+    const week6 = { id: 'dup', date: 'May 28, 2020', weekNumber: '6' } as any;
+    const compiled = compileStructuredFeedback('Geoff', week6, { diaryText: 'well done' } as any);
+    expect(compiled.reviewNotice).toContain('May 28, 2020 (Week 6)');
+    expect(compiled.reviewNotice).not.toContain('Week 7');
+  });
+
+  it('includes a field only when that field has text', () => {
+    const entry = { id: 'e1', date: 'May 28, 2020', weekNumber: '6' } as any;
+    const withText = compileStructuredFeedback('Geoff', entry, { diaryText: 'nice work' } as any);
+    expect(withText.includeDiary).toBe(true);
+    const empty = compileStructuredFeedback('Geoff', entry, {} as any);
+    expect(empty.includeDiary).toBe(false);
+    expect(empty.includeOverall).toBe(false);
   });
 });

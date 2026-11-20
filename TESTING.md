@@ -83,7 +83,7 @@ tests that span multiple source files.
 ## How to add a test
 
 1. Identify the pure function or boundary you want to lock in.
-2. Write a fixture file under `__fixtures__/` if the input is more than a few lines. Use synthetic data only; never commit real student pages.
+2. Write a fixture file under `__fixtures__/` if the input is more than a few lines.
 3. Write the test as `describe('<function name>', ...)` with one `it` per case.
 4. Run `npm test` to confirm it passes locally.
 5. Commit the test alongside the change it covers, not in a separate "tests" commit.

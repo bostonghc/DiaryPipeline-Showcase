@@ -15,3 +15,14 @@ export const isFirestoreQuotaError = (e: any): boolean => {
     /quota metric '\s*free/i.test(msg)
   );
 };
+
+// Readable reason for a failed Firestore call. A rules rejection is called out
+// explicitly: a new collection without a deployed rule fails with
+// permission-denied, and the usual fix is deploying firestore.rules.
+export const describeFirestoreError = (e: any): string => {
+  if (e?.code === 'permission-denied') {
+    return 'Firestore rules rejected this (permission-denied). If this is a newly added feature, the latest firestore.rules may not be deployed yet.';
+  }
+  if (isFirestoreQuotaError(e)) return 'The Firestore daily quota has been reached; try again tomorrow.';
+  return String(e?.message || e || 'Unknown error');
+};

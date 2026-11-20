@@ -4,14 +4,46 @@ import {
   sanitizeFeedbackHistoryWire,
   sanitizeFeedbackReviewDecisionWire,
   hydrateFeedbackHistoryRecord,
+  hydratePageSyncRecord,
   collapseHydratedPageEntries,
+  sanitizeUserPreferencesWire,
+  resolveClassParserConfig,
 } from './firestoreDataService';
 import type {
   FeedbackHistoryRecord,
   FeedbackReviewDecisionRecord,
   HydratedPageEntry,
   StoredDiaryEntry,
+  UserPreferences,
 } from '../types';
+
+describe('page sync record hydration', () => {
+  it('preserves reconciliation metadata and infers legacy section failures', () => {
+    const orphan = hydratePageSyncRecord({
+      pageId: 'page-1',
+      classId: 'class-1',
+      parserMode: 'label-first',
+      templateVersion: 'labeled-diary-v1',
+      syncState: 'saved',
+      entryCount: 3,
+      orphanedAt: '2026-08-27T00:00:00.000Z',
+      updatedAt: '2026-08-27T00:00:00.000Z',
+    });
+    expect(orphan.recordKind).toBe('page');
+    expect(orphan.orphanedAt).toBe('2026-08-27T00:00:00.000Z');
+
+    const sectionError = hydratePageSyncRecord({
+      pageId: 'error-section-1',
+      classId: 'class-1',
+      parserMode: 'label-first',
+      templateVersion: 'labeled-diary-v1',
+      syncState: 'error',
+      entryCount: 0,
+      updatedAt: '2026-08-27T00:00:00.000Z',
+    });
+    expect(sectionError.recordKind).toBe('section_error');
+  });
+});
 
 const rec = (overrides: Partial<FeedbackHistoryRecord> = {}): FeedbackHistoryRecord => ({
   feedbackId: 'f1',
@@ -167,6 +199,48 @@ describe('collapseHydratedPageEntries ordering', () => {
   });
 });
 
+describe('sanitizeUserPreferencesWire review focus', () => {
+  it('writes only known review-focus string fields, plus the version', () => {
+    const prefs = {
+      reviewFocus: { vocab: 'Word forms', overall: '', bogus: 'x', diaryText: 5 },
+      reviewFocusVersion: 1,
+    } as unknown as UserPreferences;
+    expect(sanitizeUserPreferencesWire(prefs)).toEqual({
+      reviewFocus: { vocab: 'Word forms', overall: '' },
+      reviewFocusVersion: 1,
+    });
+  });
+});
+
+describe('sanitizeUserPreferencesWire', () => {
+  it('removes explicit undefined values before Firestore preference writes', () => {
+    const prefs = {
+      ffItemCount: undefined,
+      priorFeedbackMode: undefined,
+      feedbackTone: 'specific',
+      teacherDisplayName: '',
+      aiPrompts: {
+        diaryText: 'Diary instruction',
+        peerFeedback: undefined,
+        vocab: 'Vocab instruction',
+        translations: undefined,
+        overall: 'Overall instruction',
+      },
+      exportPresets: undefined,
+    } as unknown as UserPreferences;
+
+    expect(sanitizeUserPreferencesWire(prefs)).toEqual({
+      feedbackTone: 'specific',
+      teacherDisplayName: '',
+      aiPrompts: {
+        diaryText: 'Diary instruction',
+        vocab: 'Vocab instruction',
+        overall: 'Overall instruction',
+      },
+    });
+  });
+});
+
 describe('feedbackHistory wire round-trip (sanitize -> hydrate)', () => {
   it('persists optional batchId for multi-week delivery provenance', () => {
     const wire = sanitizeFeedbackHistoryWire(rec({ batchId: 'batch-123' }));
@@ -262,5 +336,166 @@ describe('feedbackReviewDecisions wire round-trip (sanitize -> hydrate)', () => 
     );
     expect('batchId' in wire).toBe(false);
     expect('studentGraphId' in wire).toBe(false);
+  });
+});
+
+
+describe('feedback provenance', () => {
+  const base = {
+    feedbackId: 'fb-1', classId: 'c1', pageId: 'p1', entryId: 'e1',
+    studentUpn: 'student@example.edu', studentName: 'Student',
+    channel: 'email' as const, sentAt: '2026-09-01T00:00:00.000Z',
+    source: 'human' as const, fieldsAddressed: ['diaryText'],
+    content: '<p>hi</p>', updatedAt: '2026-09-01T00:00:00.000Z',
+  };
+
+  it('round-trips the author identity', () => {
+    const wire = sanitizeFeedbackHistoryWire({
+      ...base,
+      authorUpn: 'intern@university.example',
+      authorName: 'An Intern',
+      authorRole: 'intern',
+      authorFirebaseUid: 'firebase-uid-1',
+    } as any);
+    const record = hydrateFeedbackHistoryRecord(wire);
+    expect(record.authorUpn).toBe('intern@university.example');
+    expect(record.authorName).toBe('An Intern');
+    expect(record.authorRole).toBe('intern');
+    expect(record.authorFirebaseUid).toBe('firebase-uid-1');
+  });
+
+  it('leaves legacy records unattributed rather than crediting the reader', () => {
+    // Records written before provenance existed have no author. Defaulting
+    // them to the signed-in user would fabricate an audit trail.
+    const record = hydrateFeedbackHistoryRecord({ ...base });
+    expect(record.authorUpn).toBeUndefined();
+    expect(record.authorName).toBeUndefined();
+    expect(record.authorRole).toBeUndefined();
+    expect(record.authorFirebaseUid).toBeUndefined();
+  });
+
+  it('omits author keys from the wire when unknown', () => {
+    // Firestore rules reject unknown/!null shapes; absent is not the same as
+    // present-and-empty.
+    const wire = sanitizeFeedbackHistoryWire({ ...base } as any);
+    expect('authorUpn' in wire).toBe(false);
+    expect('authorRole' in wire).toBe(false);
+  });
+
+  it('rejects a role outside the known set', () => {
+    const record = hydrateFeedbackHistoryRecord({ ...base, authorRole: 'administrator' });
+    expect(record.authorRole).toBeUndefined();
+  });
+
+  it('records both identities so a mismatch is visible', () => {
+    // Microsoft sends the message; Firebase owns the document. They come from
+    // unrelated sign-ins, so both are stored deliberately.
+    const record = hydrateFeedbackHistoryRecord({
+      ...base,
+      authorUpn: 'intern@university.example',
+      authorFirebaseUid: 'some-other-google-account-uid',
+    });
+    expect(record.authorUpn).not.toBe(record.authorFirebaseUid);
+    expect(record.authorUpn).toBeTruthy();
+    expect(record.authorFirebaseUid).toBeTruthy();
+  });
+});
+
+describe('feedback history wire rejects nothing Firestore would reject', () => {
+  const base = {
+    feedbackId: 'fb-2', classId: 'c1', pageId: 'p1', entryId: 'e1',
+    studentUpn: 's@example.edu', studentName: 'S',
+    channel: 'email' as const, sentAt: '2026-09-08T10:45:20.000Z',
+    source: 'human' as const, fieldsAddressed: ['diaryText'],
+    content: '<p>x</p>', updatedAt: '2026-09-08T10:45:20.000Z',
+  };
+
+  const hasUndefinedDeep = (value: unknown): boolean => {
+    if (value === undefined) return true;
+    if (Array.isArray(value)) return value.some(hasUndefinedDeep);
+    if (value && typeof value === 'object') {
+      return Object.values(value as Record<string, unknown>).some(hasUndefinedDeep);
+    }
+    return false;
+  };
+
+  it('drops a nested undefined instead of failing the whole write', () => {
+    // Regression: structuredFeedback.priorExcerpt is set explicitly to
+    // undefined when prior-feedback mode is off. Firestore rejects undefined
+    // anywhere in a document, so the record was refused *after* the email had
+    // already been sent — no history, no author, entry still queued as unsent.
+    const wire = sanitizeFeedbackHistoryWire({
+      ...base,
+      structuredFeedback: { diaryFeedback: 'good', priorExcerpt: undefined } as any,
+    } as any);
+    expect(hasUndefinedDeep(wire)).toBe(false);
+    expect('priorExcerpt' in (wire.structuredFeedback as object)).toBe(false);
+    expect((wire.structuredFeedback as any).diaryFeedback).toBe('good');
+  });
+
+  it('prunes undefined inside entrySnapshot and its arrays', () => {
+    const wire = sanitizeFeedbackHistoryWire({
+      ...base,
+      entrySnapshot: {
+        diaryText: 'hello',
+        chatbotFeedback: undefined,
+        peerFeedback: [{ contributor: 'A', feedback: 'nice', extra: undefined }],
+      } as any,
+    } as any);
+    expect(hasUndefinedDeep(wire)).toBe(false);
+    expect((wire.entrySnapshot as any).diaryText).toBe('hello');
+    expect((wire.entrySnapshot as any).peerFeedback[0].contributor).toBe('A');
+  });
+
+  it('drops undefined array elements, not just undefined properties', () => {
+    // Firestore rejects an undefined element exactly as it rejects an undefined
+    // field. Mapping over the array preserved the hole, so a single missing
+    // element still failed the whole write after the message had been sent.
+    const wire = sanitizeFeedbackHistoryWire({
+      ...base,
+      entrySnapshot: {
+        vocabItems: ['a', undefined, 'b'],
+        peerFeedback: [undefined, { contributor: 'A', feedback: 'nice' }],
+        translations: [],
+      } as any,
+    } as any);
+    expect(hasUndefinedDeep(wire)).toBe(false);
+    expect((wire.entrySnapshot as any).vocabItems).toEqual(['a', 'b']);
+    expect((wire.entrySnapshot as any).peerFeedback).toEqual([
+      { contributor: 'A', feedback: 'nice' },
+    ]);
+  });
+
+  it('keeps falsy values that are not undefined', () => {
+    // Empty strings, zero and null are real values; only undefined means absent.
+    const wire = sanitizeFeedbackHistoryWire({
+      ...base,
+      structuredFeedback: { diaryFeedback: '', includeDiary: false, count: 0 } as any,
+    } as any);
+    expect((wire.structuredFeedback as any).diaryFeedback).toBe('');
+    expect((wire.structuredFeedback as any).includeDiary).toBe(false);
+    expect((wire.structuredFeedback as any).count).toBe(0);
+  });
+});
+
+describe('class parser config', () => {
+  it('keeps the saved or default mode when Gemini is available', () => {
+    expect(resolveClassParserConfig(undefined, true)).toEqual({ parserMode: 'ai', templateVersion: 'legacy-ai' });
+    expect(resolveClassParserConfig({ parserMode: 'label-first' }, true))
+      .toEqual({ parserMode: 'label-first', templateVersion: 'labeled-diary-v1' });
+    // A template saved without a mode predates parserMode and belonged to the AI default.
+    expect(resolveClassParserConfig({ templateVersion: 'legacy-ai' }, true))
+      .toEqual({ parserMode: 'ai', templateVersion: 'legacy-ai' });
+  });
+
+  it('runs every class label-first without Gemini, including classes saved as AI', () => {
+    // A new hosted user: no saved settings.
+    expect(resolveClassParserConfig(undefined, false))
+      .toEqual({ parserMode: 'label-first', templateVersion: 'labeled-diary-v1' });
+    // A class already saved with the old AI default must not keep the AI template.
+    expect(resolveClassParserConfig({ parserMode: 'ai', templateVersion: 'legacy-ai' }, false))
+      .toEqual({ parserMode: 'label-first', templateVersion: 'labeled-diary-v1' });
+    expect(resolveClassParserConfig({ parserMode: 'label-first', templateVersion: 'labeled-diary-v1' }, false))
+      .toEqual({ parserMode: 'label-first', templateVersion: 'labeled-diary-v1' });
   });
 });

@@ -1,6 +1,7 @@
 
 import * as XLSX from 'xlsx';
 import { ExportFieldGroup, ExportFormat, ExportPreset, PageSyncRecord, StoredDiaryEntry, TeacherFeedbackFields } from '../types';
+import type { ProgressExportOptions, ProgressExportRow } from './progressReportService';
 
 const stringifyFeedback = (feedback: TeacherFeedbackFields) =>
   (Object.entries(feedback) as [string, string | undefined][])
@@ -376,4 +377,18 @@ export const exportCoverage = (
   ].join('_');
 
   downloadRows(rows, options.format, fileStem, 'Coverage');
+};
+
+export const exportProgressRows = (
+  rows: ProgressExportRow[],
+  options: ProgressExportOptions,
+): void => {
+  const fileStem = [
+    'progress',
+    formatExportTimestamp(),
+    sanitizeFilenamePart(options.scopeLabel || `${rows.length}-students`),
+    `${rows.length}students`,
+  ].join('_');
+
+  downloadRows(rows as unknown as Record<string, string | number>[], options.format, fileStem, 'Progress');
 };

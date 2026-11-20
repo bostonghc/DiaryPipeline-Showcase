@@ -1,3 +1,5 @@
+import type { CollaborationRole } from './services/collaborationAccess';
+import type { AiReviewFieldKey } from './services/aiFeedbackReview';
 
 export interface EducationClass {
   id: string;
@@ -116,6 +118,8 @@ export interface SyncJobItem {
   parserMode: ParserMode;
   templateVersion: TemplateVersion;
   oneNoteLastModified?: string;
+  /** Set by Force re-sync: re-parse even when the content fingerprint is unchanged. */
+  forceReparse?: boolean;
   status: SyncJobItemStatus;
   runId?: string;
   claimedAt?: string;
@@ -169,6 +173,7 @@ export interface HydratedPageEntry {
 export interface PageSyncRecord {
   pageId: string;
   classId: string;
+  recordKind?: 'page' | 'section_error';
   pageTitle: string;
   studentName: string;
   diaryGroupId?: string;
@@ -184,6 +189,11 @@ export interface PageSyncRecord {
   lastViewedAt?: string;
   lastError?: string;
   nextRetryAt?: string;
+  orphanedAt?: string;
+  /** Fingerprint of the content last saved (see services/pageFreshness.ts). */
+  contentHash?: string;
+  /** When the page's content was last downloaded, changed or not. Drives the refresh window. */
+  lastReadAt?: string;
   updatedAt: string;
 }
 
@@ -234,6 +244,15 @@ export interface UserPreferences {
     translations: string;
     overall: string;
   };
+
+  /**
+   * What the AI reviewer should look for in each field. Only saved custom text
+   * lives here; blank or absent means "use the default" (see effectiveReviewFocus).
+   * Distinct from `aiPrompts`, the retired AI Draft instructions, which are kept
+   * as a read-only reference and never used as review focus.
+   */
+  reviewFocus?: Partial<Record<AiReviewFieldKey, string>>;
+  reviewFocusVersion?: 1;
 
   // Export presets (custom entries; built-in presets are code constants)
   exportPresets?: ExportPreset[];
@@ -326,6 +345,21 @@ export interface FeedbackHistoryRecord {
   sentAt: string;
   batchId?: string;
   source: FeedbackSource;
+  // Provenance (collaboration pilot). Recorded because the pilot replaced
+  // recipient-constrained sending with author identity as a working control:
+  // interns message students directly, so the record must say who sent it.
+  //
+  // Both identities are stored deliberately. The Microsoft UPN is who the
+  // message was sent *from*; the Firebase uid is who owns the Firestore
+  // document. They come from unrelated sign-ins, so recording both makes a
+  // mismatch visible in the data rather than invisible.
+  //
+  // authorRole is captured at send time, not resolved at read time: roles
+  // change, and an audit trail should say what was true when the message went.
+  authorUpn?: string;
+  authorName?: string;
+  authorRole?: CollaborationRole;
+  authorFirebaseUid?: string;
   fieldsAddressed: string[];
   content: string;
   updatedAt: string;
@@ -347,6 +381,12 @@ export interface FeedbackHistoryRecord {
   // How the recipient address was determined. Optional for backwards-compat with
   // records written before this field was introduced.
   recipientResolutionSource?: EmailResolutionSource;
+  // Ids of the AI reviews run on this entry's fields before sending. Records
+  // assistance, not authorship: `source` stays 'human'. At most 20.
+  aiReviewIds?: string[];
+  // Non-negative count of review ids that did not fit the 20-id cap. Written as 0 whenever any
+  // review is linked; records from before this field hydrate to 0.
+  aiReviewIdsOmitted?: number;
 }
 
 export interface FeedbackReviewDecisionRecord {
@@ -414,10 +454,9 @@ export interface AppConfig {
   isSandbox: boolean;
 }
 
-export type GeminiModel =
-  | 'gemini-2.5-flash'
-  | 'gemini-2.5-flash-lite'
-  | 'gemini-3-flash';
+// Model ids live in services/geminiModels.ts (single source of truth). Kept as a
+// string alias so a catalog edit never requires a matching edit here.
+export type GeminiModel = string;
 
 export interface UserConfig {
   filterStrings: string[];

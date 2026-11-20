@@ -106,7 +106,7 @@ export const FeedbackWorkspace: React.FC<FeedbackWorkspaceProps> = ({
                 </button>
               )}
               <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
-                Lab studies favor 2–4 focused items; classroom EFL practice often goes broader. Choose what fits this entry.
+                Lab studies favor 2–4 focused items; classroom EFL practice often goes broader. Choose what fits this entry. This count applies to AI review.
               </p>
             </div>
 
@@ -118,7 +118,7 @@ export const FeedbackWorkspace: React.FC<FeedbackWorkspaceProps> = ({
                 <InfoTooltip>
                   <strong className="font-semibold">Why use prior feedback?</strong> Continuity in feedback (Carless 2020 longitudinal partnerships) improves student uptake and engagement — students who perceive feedback as building on prior comments engage more.
                   <br /><br />
-                  <strong className="font-semibold">Reference</strong> shows you the last messages and uses them as context for AI drafts so they avoid repetition. <strong className="font-semibold">Include</strong> additionally sends a brief excerpt to the student as a continuity signal. <strong className="font-semibold">Off</strong> when the entry stands alone or you want a fresh perspective.
+                  <strong className="font-semibold">Reference</strong> shows you the last messages and uses them as context for AI reviews so they avoid repetition. <strong className="font-semibold">Include</strong> additionally sends a brief excerpt to the student as a continuity signal. <strong className="font-semibold">Off</strong> when the entry stands alone or you want a fresh perspective.
                 </InfoTooltip>
               </div>
               <SegmentedControl
@@ -139,7 +139,7 @@ export const FeedbackWorkspace: React.FC<FeedbackWorkspaceProps> = ({
                 </button>
               )}
               <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
-                Reference and Include both use prior context in AI drafts, helping them avoid repeating earlier points.
+                Reference and Include both use prior context in AI reviews, helping them avoid repeating earlier points.
               </p>
             </div>
           </div>
@@ -156,7 +156,9 @@ export const FeedbackWorkspace: React.FC<FeedbackWorkspaceProps> = ({
         </FeedbackSection>
 
         <FeedbackSection
-          title="Past Teacher Feedback"
+          // Not "Teacher": in the collaboration pilot this history is the
+          // signed-in author's own sent feedback, which may be an intern's.
+          title="Past Feedback"
           icon={<History size={14} />}
           count={pastFeedback?.length}
           open={pastFeedbackOpen}
@@ -375,14 +377,39 @@ const stripHtmlToText = (htmlOrText: string): string => {
   return stripped;
 };
 
+/**
+ * Who sent a past message. Shown because the collaboration pilot lets interns
+ * message students directly, so "who wrote this" is a control, not a detail.
+ * Records written before provenance existed are labelled unattributed rather
+ * than silently credited to whoever is reading.
+ */
+const FeedbackAuthorTag: React.FC<{ record: FeedbackHistoryRecord }> = ({ record }) => {
+  const name = record.authorName || record.authorUpn;
+  if (!name) {
+    return (
+      <span className="text-[9px] font-bold text-slate-300 uppercase tracking-wider" title="Sent before author identity was recorded">
+        author not recorded
+      </span>
+    );
+  }
+  return (
+    <span className="text-[9px] font-bold text-slate-400 tracking-wide" title={record.authorUpn || undefined}>
+      {name}{record.authorRole ? ` · ${record.authorRole}` : ''}
+    </span>
+  );
+};
+
 const CARD_HEADER: React.FC<{ record: FeedbackHistoryRecord }> = ({ record }) => (
   <>
     <div className="flex items-center justify-between mb-2">
       <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
         {formatSentAt(record.sentAt)}
       </span>
-      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider px-1.5 py-0.5 bg-slate-100 rounded">
-        {record.channel}
+      <span className="flex items-center gap-2">
+        <FeedbackAuthorTag record={record} />
+        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider px-1.5 py-0.5 bg-slate-100 rounded">
+          {record.channel}
+        </span>
       </span>
     </div>
     {record.fieldsAddressed.length > 0 && (

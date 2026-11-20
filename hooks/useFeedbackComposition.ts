@@ -6,10 +6,11 @@ import {
   type Dispatch,
   type SetStateAction,
 } from 'react';
+import type { IdentityClaims } from '../services/identityClaims';
 import type { Firestore } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { GraphService } from '../services/graphService';
-import { draftFieldFeedback } from '../services/geminiService';
+import { ITEM_COUNT_HINTS } from '../services/aiFeedbackReview';
 import {
   compileStructuredFeedback,
   renderBatchFeedbackToHTML,
@@ -24,6 +25,7 @@ import {
   summarizePageWorkflow,
   type PageWorkflowSummary,
 } from '../services/feedbackWorkflowService';
+import type { CollaborationAccessProfile } from '../services/collaborationAccess';
 import {
   fetchFeedbackReviewDecisionsForPage,
   fetchRecentFeedbackForPage,
@@ -67,6 +69,21 @@ export interface UseFeedbackCompositionParams {
   accessToken: string | null;
   firebaseUser: User | null;
   db: Firestore;
+  /**
+   * Resolved collaboration profile, passed rather than read from context:
+   * this hook is called from App's body, which renders
+   * CollaborationAccessProvider and therefore sits above it in the tree.
+   * Reading the context here throws.
+   */
+  accessProfile: CollaborationAccessProfile | null;
+  /**
+   * Identity claims on the Firebase sign-in, once bound to the live Microsoft
+   * account (hooks/useIdentityBinding.ts); null until then. Author fields on
+   * sent-feedback records are written from these attested values, and sending
+   * waits for them, so a message never goes out without a record the rules
+   * can verify (docs/reference/feedback-attribution-plan.md).
+   */
+  identityClaims: Partial<IdentityClaims> | null;
 
   // User settings context
   account: any | null;
@@ -103,6 +120,8 @@ export interface UseFeedbackCompositionParams {
   priorFeedback: PriorFeedbackMode;
   pastFeedbackForStudent: FeedbackHistoryRecord[];
   onFeedbackHistorySaved?: (record: FeedbackHistoryRecord) => void;
+  /** Ids of AI reviews run on an entry this session; recorded on the sent record. */
+  getAiReviewRefsForEntry?: (entryId: string) => { ids: string[]; omitted: number };
 
   // Cross-cutting
   setError: (msg: string | null) => void;
@@ -120,7 +139,6 @@ export interface UseFeedbackCompositionResult {
   isSendingFeedback: boolean;
   isResolvingEmail: boolean;
   emailResolutionSource: EmailResolutionSource | null;
-  isDrafting: Record<string, boolean>;
   batchEntryOptions: FeedbackBatchEntryOption[];
   includedBatchPreviewItems: FeedbackBatchPreviewItem[];
   updateBatchEntryDecision: (
@@ -131,11 +149,6 @@ export interface UseFeedbackCompositionResult {
   // Actions
   reviewAndSend: (entryId: string) => Promise<void>;
   sendFeedback: (method: 'email' | 'teams') => Promise<void>;
-  draftFeedback: (
-    entryId: string,
-    fieldName: string,
-    fieldValue: any
-  ) => Promise<void>;
   closeModal: () => void;
   markEmailManuallyEdited: () => void;
 
@@ -173,19 +186,46 @@ export interface UseFeedbackCompositionResult {
   ) => Promise<void>;
 }
 
-const ITEM_COUNT_HINTS: Record<FFItemCount, string> = {
-  '1-2': 'Limit to 1–2 of the most impactful points. Appropriate when the student is at high cognitive load, is affectively fragile, or when a single error pattern dominates and deserves focused attention.',
-  '3-4': 'Aim for 3–4 targeted, specific points — the formative-weekly default. Research on focused corrective feedback (Sheen, Ferris) supports this range for sustained improvement over a semester when paired with revision opportunity.',
-  '5+': 'Provide comprehensive coverage with 5 or more specific observations. Appropriate for summative or grading-cycle feedback, exam preparation, or when the teacher is calibrating against a rubric. Less effective for formative weekly cycles where attention is the bottleneck.',
-};
-
 const createRecordId = (prefix: string): string =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
     : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-const getEntryKey = (entry: ParsedDiaryEntry, index: number): string =>
+/** The `aiReviewIds` field for a sent record: omitted when empty, at most 20. */
+export const aiReviewIdsField = (
+  ids: string[] | undefined,
+  omitted = 0
+): { aiReviewIds?: string[]; aiReviewIdsOmitted?: number } => {
+  const list = ids ?? [];
+  const totalOmitted = Math.max(0, omitted) + Math.max(0, list.length - 20);
+  return {
+    ...(list.length > 0 ? { aiReviewIds: list.slice(0, 20) } : {}),
+    // Recorded explicitly (0 included) whenever any review was linked or excluded.
+    ...(list.length > 0 || totalOmitted > 0 ? { aiReviewIdsOmitted: totalOmitted } : {}),
+  };
+};
+
+export const getEntryKey = (entry: ParsedDiaryEntry, index: number): string =>
   entry.id || String(index);
+
+/**
+ * Resolve an entry by the key the UI actually addresses it with.
+ *
+ * Exported so the resolution is testable on its own: matching on `entry.id`
+ * alone is not equivalent, because getEntryKey falls back to the index for
+ * entries with no id, and duplicate ids do occur (App.tsx has
+ * ensureUniqueEntryIds for exactly that). First match wins, mirroring the
+ * Array.prototype.find this replaced.
+ */
+export const findEntryByKey = (
+  entries: ParsedDiaryEntry[],
+  entryKey: string
+): ParsedDiaryEntry | null => {
+  for (let index = 0; index < entries.length; index += 1) {
+    if (getEntryKey(entries[index], index) === entryKey) return entries[index];
+  }
+  return null;
+};
 
 const getEntryLabel = (entry: ParsedDiaryEntry, index: number): string => {
   const date = String(entry.date || '').trim();
@@ -211,19 +251,6 @@ const getFieldsAddressed = (feedback: StructuredFeedback): string[] => {
   if (feedback.includeOverall && feedback.overallFeedback)
     fieldsAddressed.push('overall');
   return fieldsAddressed;
-};
-
-// Extracts all teacher comment text from a record for AI context injection.
-const extractPriorContext = (record: FeedbackHistoryRecord): string => {
-  if (record.structuredFeedback) {
-    const sf = record.structuredFeedback;
-    const parts: string[] = [];
-    if (sf.includeDiary && sf.diaryFeedback) parts.push(`Diary: ${sf.diaryFeedback}`);
-    if (sf.includeVocab && sf.vocabFeedback) parts.push(`Vocabulary: ${sf.vocabFeedback}`);
-    if (sf.includeOverall && sf.overallFeedback) parts.push(`Overall: ${sf.overallFeedback}`);
-    return parts.join('\n');
-  }
-  return record.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 600);
 };
 
 // Extracts a short student-facing excerpt from the most recent record for
@@ -261,6 +288,8 @@ export function useFeedbackComposition(
     accessToken,
     firebaseUser,
     db,
+    accessProfile,
+    identityClaims,
     account,
     userConfig,
     aiPrompts,
@@ -277,6 +306,7 @@ export function useFeedbackComposition(
     priorFeedback,
     pastFeedbackForStudent,
     onFeedbackHistorySaved,
+    getAiReviewRefsForEntry,
     setError,
     addLog,
   } = params;
@@ -291,7 +321,6 @@ export function useFeedbackComposition(
   const [isResolvingEmail, setIsResolvingEmail] = useState(false);
   const [emailResolutionSource, setEmailResolutionSource] =
     useState<EmailResolutionSource | null>(null);
-  const [isDrafting, setIsDrafting] = useState<Record<string, boolean>>({});
   const [batchEntryDecisions, setBatchEntryDecisions] = useState<
     Record<string, FeedbackBatchDecision>
   >({});
@@ -470,7 +499,7 @@ export function useFeedbackComposition(
                 userConfig.customSignOff
               );
 
-        return {
+        const previewItem: FeedbackBatchPreviewItem = {
           entryId: option.entryId,
           label: option.label,
           isCurrent: option.entryId === activeFeedbackEntryId,
@@ -483,6 +512,7 @@ export function useFeedbackComposition(
                 : undefined,
           },
         };
+        return previewItem;
       })
       .filter((item): item is FeedbackBatchPreviewItem => Boolean(item));
   }, [
@@ -542,7 +572,14 @@ export function useFeedbackComposition(
   const reviewAndSend = useCallback(
     async (entryId: string) => {
       if (!parsedPageContent) return;
-      const entry = parsedPageContent.find((e) => e.id === entryId);
+      // Resolve by the same key every other lookup in this file uses. Matching
+      // on `e.id` alone is not equivalent: getEntryKey falls back to the index
+      // for entries without an id, and duplicate ids do occur (App.tsx has
+      // ensureUniqueEntryIds for exactly that). A mismatch here compiles the
+      // drafts of the requested entry against a *different* entry object, so
+      // the review notice names the wrong week — and the notice is the one
+      // field the review modal does not preview.
+      const entry = findEntryByKey(parsedPageContent, entryId);
       if (!entry) return;
 
       const feedback = teacherFeedback[entryId];
@@ -564,8 +601,8 @@ export function useFeedbackComposition(
 
       // Try to resolve the student's email in the background.
       // Include selectedPageTitle so that extractStudentNumber can pull the
-      // 7-digit ID (e.g. "1234570" from "1234570 - 山田花子") and Strategy A
-      // (UPN substring match) finds ak1234567@school.edu even
+      // 7-digit ID (e.g. "1234570" from "1234570 - 山田陽菜") and Strategy A
+      // (UPN substring match) finds ak1234570@school.edu even
       // when display names are ID-only.
       setIsResolvingEmail(true);
       try {
@@ -608,6 +645,12 @@ export function useFeedbackComposition(
     async (method: 'email' | 'teams') => {
       if (!compiledFeedback || !compiledFeedback.studentEmail) {
         alert('Please provide a valid student email address.');
+        return;
+      }
+      if (!identityClaims) {
+        // Checked before delivery: sending without attested identity would
+        // deliver a message whose history record the rules may reject.
+        alert('Your sign-in is still being verified. Wait a moment and try again; if this persists, reload the page or sign out and back in.');
         return;
       }
 
@@ -720,6 +763,22 @@ export function useFeedbackComposition(
         if (firebaseUser) {
           try {
             const nowIso = new Date().toISOString();
+            // Provenance, captured at send time. In the collaboration pilot the
+            // sender is often an intern rather than the account that owns this
+            // Firestore subtree, and roles change — so the record carries the
+            // Microsoft identity that sent the message, the Firebase identity
+            // that owns the document, and the role as it stood right now.
+            // Written from the attested claims, not the browser's own view of
+            // the Microsoft session, so the rules can compare them exactly.
+            // Written verbatim: the rules require each field and compare it to
+            // its claim, so dropping an empty one (e.g. a blank display name)
+            // would reject the record after the message was already delivered.
+            const author = {
+              authorUpn: identityClaims.ms_upn,
+              authorName: identityClaims.ms_name,
+              authorRole: identityClaims.ms_role,
+              authorFirebaseUid: firebaseUser.uid,
+            };
             const records: FeedbackHistoryRecord[] = compiledByEntry.map((item) => ({
               feedbackId: createRecordId(`${activePageId}_${item.entry.id}`),
               classId: activeClassId,
@@ -731,6 +790,7 @@ export function useFeedbackComposition(
               sentAt: nowIso,
               batchId,
               source: 'human',
+              ...author,
               fieldsAddressed: getFieldsAddressed(item.feedback),
               content: htmlBody,
               updatedAt: nowIso,
@@ -746,6 +806,10 @@ export function useFeedbackComposition(
               itemCountSetting: ffItemCount,
               priorFeedbackMode: priorFeedback,
               recipientResolutionSource: emailResolutionSource ?? undefined,
+              ...(() => {
+                const refs = getAiReviewRefsForEntry?.(item.entry.id);
+                return aiReviewIdsField(refs?.ids, refs?.omitted);
+              })(),
             }));
             const reviewDecisions: FeedbackReviewDecisionRecord[] =
               reviewedNoFeedbackEntries.map((item) => ({
@@ -809,6 +873,14 @@ export function useFeedbackComposition(
               `Feedback sent but history record failed to save: ${historyError.message}`
             );
           }
+        } else {
+          // Silent skip here is indistinguishable from success: the message
+          // reaches the student, no record is written, and the entry stays in
+          // the review queue as unsent with no explanation anywhere.
+          addLog(
+            'Feedback sent, but NO history record was saved: not connected to saved records. ' +
+            'Connect Firestore and re-send if this entry must appear in the review queue and audit trail.'
+          );
         }
 
         setShowFeedbackModal(false);
@@ -830,7 +902,7 @@ export function useFeedbackComposition(
       teacherFeedback,
       userConfig.teacherDisplayName,
       userConfig.customSignOff,
-      account?.name,
+      identityClaims,
       firebaseUser,
       db,
       activeClassId,
@@ -839,68 +911,7 @@ export function useFeedbackComposition(
       priorFeedback,
       emailResolutionSource,
       onFeedbackHistorySaved,
-    ]
-  );
-
-  const draftFeedback = useCallback(
-    async (entryId: string, fieldName: string, fieldValue: any) => {
-      const draftKey = `${entryId}-${fieldName}`;
-      setIsDrafting((prev) => ({ ...prev, [draftKey]: true }));
-      const promptInstruction =
-        fieldName === 'peerFeedback'
-          ? aiPrompts.peerFeedback
-          : fieldName === 'vocab'
-            ? aiPrompts.vocab
-            : fieldName === 'translations'
-              ? aiPrompts.translations
-              : fieldName === 'overall'
-                ? aiPrompts.overall
-                : aiPrompts.diaryText;
-      const priorFeedbackContext = priorFeedback !== 'off' && pastFeedbackForStudent.length > 0
-        ? extractPriorContext(pastFeedbackForStudent[0])
-        : undefined;
-
-      try {
-        const draft = await draftFieldFeedback(
-          fieldName,
-          fieldValue,
-          activeStudentName,
-          {
-            model: userConfig.aiModelFeedback,
-            tone: userConfig.feedbackTone,
-            customInstruction: promptInstruction,
-            itemCountHint: ITEM_COUNT_HINTS[ffItemCount],
-            priorFeedbackContext,
-            onRetry: (attempt, delay) => {
-              addLog(
-                `Drafting rate limit hit. Retrying in ${Math.round(delay / 1000)}s... (Attempt ${attempt}/3)`
-              );
-            },
-          }
-        );
-        setTeacherFeedback((prev) => ({
-          ...prev,
-          [entryId]: {
-            ...prev[entryId],
-            [fieldName]: draft,
-          },
-        }));
-      } catch (err) {
-        console.error('Drafting error:', err);
-      } finally {
-        setIsDrafting((prev) => ({ ...prev, [draftKey]: false }));
-      }
-    },
-    [
-      aiPrompts,
-      activeStudentName,
-      userConfig.aiModelFeedback,
-      userConfig.feedbackTone,
-      ffItemCount,
-      priorFeedback,
-      pastFeedbackForStudent,
-      addLog,
-      setTeacherFeedback,
+      getAiReviewRefsForEntry,
     ]
   );
 
@@ -992,13 +1003,11 @@ export function useFeedbackComposition(
     isResolvingEmail,
     emailResolutionSource,
     markEmailManuallyEdited,
-    isDrafting,
     batchEntryOptions,
     includedBatchPreviewItems,
     updateBatchEntryDecision,
     reviewAndSend,
     sendFeedback,
-    draftFeedback,
     closeModal,
     savedTeacherFeedback,
     setSavedTeacherFeedback,

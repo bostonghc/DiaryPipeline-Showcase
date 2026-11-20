@@ -1,17 +1,23 @@
 
 import React, { useCallback, useState, useEffect, useMemo, useRef, Component } from 'react';
-import { GraphService } from './services/graphService';
+import { createSyncRunId, getGraphRetryAfterMs, GraphService } from './services/graphService';
 import { ExportDialog } from './components/export/ExportDialog';
-import { analyzeEntry, parseDiaryHTML } from './services/geminiService';
+import { analyzeEntry, isGeminiModelUnavailableError, parseDiaryHTML } from './services/geminiService';
+import { isGeminiAvailable } from './services/geminiModels';
 import { generateScenarioData, Scenario } from './services/mockDataService';
 import { parseLabeledDiaryHTML } from './services/parserService';
 import { cleanStudentDisplayName } from './services/feedbackFormatter';
 import { isFirestoreQuotaError } from './services/firestoreErrors';
+import { formatAiSummary } from './services/aiMeter';
 import { recordRead, formatReadSummary } from './services/readMeter';
 import { FeedbackWorkspace } from './components/feedback/FeedbackWorkspace';
 import { WorkflowBadge } from './components/feedback/WorkflowBadge';
 import { ClassDashboard } from './components/dashboard/ClassDashboard';
+import { NotebookHelpModal } from './components/help/NotebookHelpModal';
 import { SettingsModal } from './components/settings/SettingsModal';
+import { EntryWarnings } from './components/workspace/EntryWarnings';
+import { RosterFilterInput, RosterGroupHeading, RosterNoMatches, RosterUnavailableToggle } from './components/workspace/RosterFilter';
+import { orderDiaryEntriesForDisplay } from './services/diaryEntryOrder';
 import { EntryPositionIndicator } from './components/workspace/EntryPositionIndicator';
 import { NoPageSelectedState } from './components/workspace/NoPageSelectedState';
 import { SyncProgressState } from './components/workspace/SyncProgressState';
@@ -19,7 +25,36 @@ import { WorkspaceHome } from './components/workspace/WorkspaceHome';
 import { useFeedbackComposition, type FeedbackBatchDecision } from './hooks/useFeedbackComposition';
 import { useUserPreferences } from './hooks/useUserPreferences';
 import { useArchiveCaptureStatus } from './hooks/useArchiveCaptureStatus';
-import { deriveArchiveCaptureByClass } from './services/archiveCaptureStatus';
+import {
+  CollaborationAccessProvider,
+  useCollaborationAccessController,
+} from './hooks/useCollaborationAccess';
+import { useSessionKeepAlive } from './hooks/useSessionKeepAlive';
+import { useRosterView } from './hooks/useRosterView';
+import {
+  buildAccessSelectionSignature,
+  buildAccountStorageKey,
+  filterClassesForAccess,
+  filterClassIdsForAccess,
+} from './services/collaborationClientScope';
+import {
+  deriveArchiveCaptureByClass,
+  isSectionPageLoadError,
+  isUntitledPageCapturePlaceholder,
+  planPageRecordReconciliation,
+  shouldSkipPageCapture,
+} from './services/archiveCaptureStatus';
+import { decidePageQueue, isContentUnchanged, pageContentFingerprint } from './services/pageFreshness';
+import { reviewStateByEntryId, withPreservedReview, type ReviewState } from './services/syncReviewPreservation';
+import { usePastFeedbackForStudent } from './hooks/usePastFeedbackForStudent';
+import { useAiReviewSession } from './hooks/useAiReviewSession';
+import { FeedbackFieldEditor } from './components/feedback/FeedbackFieldEditor';
+import { recoverAiReviewGoogleSignIn, recoverAiReviewMicrosoftSignIn } from './services/aiReviewRecoveryActions';
+import { useAiReviewActions } from './hooks/useAiReviewActions';
+import { useIdentityBinding } from './hooks/useIdentityBinding';
+import { useInternGroupScope } from './hooks/useInternGroupScope';
+import { scopeNotebookStructure } from './services/internScope';
+import { resolveSentFeedbackReviewAccess } from './services/sentFeedbackAccess';
 import {
   getEntryWorkflowUiState,
   getEntryWorkflowLogLabel,
@@ -32,7 +67,9 @@ import {
   buildStoredEntry,
   DEFAULT_PARSER_MODE,
   DEFAULT_TEMPLATE_VERSION,
+  deletePageSyncRecord,
   fetchEntriesForPage,
+  listStoredEntriesForPage,
   fetchPageSyncRecord,
   LABEL_TEMPLATE_VERSION,
   listEntriesForClasses,
@@ -44,12 +81,12 @@ import {
   saveClassLastSynced,
   saveClassStudentIdentity,
   saveClassMetadata,
-  fetchRecentFeedbackForPage,
-  fetchRecentFeedbackForStudent,
   markFeedbackUptake,
   saveEntryRecord,
   savePageSyncRecord,
+  setPageSyncRecordOrphanedAt,
   withClassDefaults,
+  resolveClassParserConfig,
 } from './services/firestoreDataService';
 import {
   ClassStudentIdentity,
@@ -65,10 +102,10 @@ import {
   ParserMode,
   EntryStatus,
   FFItemCount,
-  FeedbackHistoryRecord,
   PageSyncRecord,
   PageSyncState,
   PriorFeedbackMode,
+  StructuredFeedback,
   SyncJob,
   SyncJobItem,
   SyncJobItemStatus,
@@ -127,7 +164,6 @@ import {
   ZoomIn,
   ZoomOut,
   Code,
-  Wand2,
   X,
   Database,
   CheckCircle,
@@ -136,6 +172,7 @@ import {
   MessageSquare,
   AlertTriangle,
   BarChart3,
+  LogOut,
 } from 'lucide-react';
 import { auth, db, firebaseProjectInfo } from './src/firebase';
 import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from 'firebase/auth';
@@ -177,7 +214,7 @@ const parseComparableTime = (value?: string): number | null => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-export class ErrorBoundary extends (Component as any) {
+export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -192,10 +229,7 @@ export class ErrorBoundary extends (Component as any) {
   }
 
   render() {
-    const state = (this as any).state;
-    const props = (this as any).props;
-    
-    if (state.hasError) {
+    if (this.state.hasError) {
       return (
         <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
           <div className="max-w-md w-full bg-white rounded-[32px] shadow-2xl p-10 border border-red-100 text-center">
@@ -208,7 +242,7 @@ export class ErrorBoundary extends (Component as any) {
             </p>
             <div className="bg-slate-50 rounded-2xl p-4 mb-8 text-left overflow-auto max-h-32 border border-slate-100">
               <code className="text-[10px] font-bold text-red-600 break-all">
-                {state.error?.message || "Unknown Error"}
+                {this.state.error?.message || "Unknown Error"}
               </code>
             </div>
             <button 
@@ -222,106 +256,90 @@ export class ErrorBoundary extends (Component as any) {
       );
     }
 
-    return props.children;
+    return this.props.children;
   }
 }
 
-const HelpModal: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ isOpen, onClose }) => {
-  if (!isOpen) return null;
+const getIncludedFeedbackReviewFields = (feedback: StructuredFeedback) =>
+  [
+    {
+      key: 'diary',
+      label: 'Diary',
+      value: feedback.includeDiary ? feedback.diaryFeedback : '',
+    },
+    {
+      key: 'peer',
+      label: 'Peer',
+      value: feedback.includePeer ? feedback.peerFeedback : '',
+    },
+    {
+      key: 'vocabulary',
+      label: 'Vocabulary',
+      value: feedback.includeVocab ? feedback.vocabFeedback : '',
+    },
+    {
+      key: 'definitions',
+      label: 'Definitions',
+      value: feedback.includeTranslations ? feedback.translationsFeedback : '',
+    },
+    {
+      key: 'chatbot',
+      label: 'Chatbot',
+      value: feedback.includeChatbot ? feedback.chatbotFeedback : '',
+    },
+    {
+      key: 'overall',
+      label: 'Overall',
+      value: feedback.includeOverall ? feedback.overallFeedback : '',
+    },
+  ].filter((field) => field.value && field.value.trim() !== '');
 
+type ContentFeedbackFieldKey =
+  | 'diaryText'
+  | 'peerFeedback'
+  | 'vocab'
+  | 'translations'
+  | 'chatbot'
+  | 'overall';
+
+interface ContentFeedbackFieldOption {
+  key: ContentFeedbackFieldKey;
+  label: string;
+  placeholder: string;
+  value: string;
+  draftValue: unknown;
+  draftDisabled?: boolean;
+}
+
+const ContentFeedbackTargetButton: React.FC<{
+  option: ContentFeedbackFieldOption;
+  active: boolean;
+  onSelect: () => void;
+}> = ({ option, active, onSelect }) => {
+  const hasFeedback = option.value.trim() !== '';
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-white w-full max-w-2xl rounded-[32px] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[80vh] animate-in zoom-in-95 duration-200">
-        <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-indigo-50/50">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-200">
-              <HelpCircle size={24} />
-            </div>
-            <div>
-              <h2 className="text-xl font-black text-slate-900 tracking-tight">Help & Documentation</h2>
-              <p className="text-xs font-bold text-indigo-600 uppercase tracking-widest">Guide & Roadmap</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="p-2 hover:bg-white rounded-xl transition-colors text-slate-400 hover:text-slate-600 shadow-sm border border-transparent hover:border-slate-200">
-            <X size={20} />
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-8 space-y-10">
-          {/* Symbols Guide */}
-          <section>
-            <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4 flex items-center gap-2">
-              <div className="w-1.5 h-4 bg-indigo-500 rounded-full" />
-              Notebook Symbols
-            </h3>
-            <div className="grid gap-4">
-              <div className="flex items-start gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center font-black text-indigo-600 shadow-sm border border-slate-100">*</div>
-                <div>
-                  <h4 className="text-sm font-bold text-slate-800">Recently Modified</h4>
-                  <p className="text-xs text-slate-500 leading-relaxed">Indicates the student has updated their diary since your last sync or view.</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center font-black text-indigo-600 shadow-sm border border-slate-100">1234567</div>
-                <div>
-                  <h4 className="text-sm font-bold text-slate-800">Student ID Match</h4>
-                  <p className="text-xs text-slate-500 leading-relaxed">A 7-digit ID was successfully found in the page title and extracted for sorting.</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center font-black text-indigo-600 shadow-sm border border-slate-100">?</div>
-                <div>
-                  <h4 className="text-sm font-bold text-slate-800">Unidentified Page</h4>
-                  <p className="text-xs text-slate-500 leading-relaxed">No 7-digit ID was found. The page might be misnamed or a non-diary entry.</p>
-                </div>
-              </div>
-              <div className="flex items-start gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center text-indigo-600 shadow-sm border border-slate-100">
-                  <RefreshCw size={16} />
-                </div>
-                <div>
-                  <h4 className="text-sm font-bold text-slate-800">Class Sync</h4>
-                  <p className="text-xs text-slate-500 leading-relaxed">The class sync button fetches the latest OneNote pages for that class and updates the saved Firestore records used for later review and export.</p>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Roadmap */}
-          <section>
-            <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4 flex items-center gap-2">
-              <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
-              Future Roadmap
-            </h3>
-            <div className="space-y-3">
-              <div className="flex items-center gap-3 p-3 border-b border-slate-100">
-                <div className="w-2 h-2 bg-emerald-400 rounded-full" />
-                <span className="text-sm font-medium text-slate-700">Background Synchronization (Phase 2)</span>
-              </div>
-              <div className="flex items-center gap-3 p-3 border-b border-slate-100">
-                <div className="w-2 h-2 bg-slate-300 rounded-full" />
-                <span className="text-sm font-medium text-slate-700">Customizable Email/Teams Templates</span>
-              </div>
-              <div className="flex items-center gap-3 p-3 border-b border-slate-100">
-                <div className="w-2 h-2 bg-slate-300 rounded-full" />
-                <span className="text-sm font-medium text-slate-700">Class-wide Performance Analytics</span>
-              </div>
-              <div className="flex items-center gap-3 p-3 border-b border-slate-100">
-                <div className="w-2 h-2 bg-slate-300 rounded-full" />
-                <span className="text-sm font-medium text-slate-700">Voice-to-Feedback Dictation</span>
-              </div>
-            </div>
-          </section>
-        </div>
-
-        <div className="p-6 bg-slate-50 border-t border-slate-100 flex justify-end">
-          <button onClick={onClose} className="px-6 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-800 transition-all shadow-md active:scale-95">
-            Got it
-          </button>
-        </div>
-      </div>
-    </div>
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`mt-4 flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-200 ${
+        active
+          ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+          : 'border-slate-200 bg-white text-slate-500 hover:border-indigo-200 hover:bg-indigo-50/60 hover:text-indigo-700'
+      }`}
+    >
+      <span className="text-[10px] font-black uppercase tracking-wider">
+        {active ? 'Editing' : 'Feedback'} · {option.label}
+      </span>
+      <span
+        className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${
+          hasFeedback
+            ? 'bg-emerald-50 text-emerald-700'
+            : 'bg-slate-100 text-slate-400'
+        }`}
+      >
+        {hasFeedback ? 'Drafted' : 'Empty'}
+      </span>
+    </button>
   );
 };
 
@@ -355,21 +373,50 @@ const App: React.FC = () => {
   const [showHelp, setShowHelp] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<'notebook' | 'dashboard'>('notebook');
   // Feedback composition state (showFeedbackModal, compiledFeedback,
-  // activeFeedbackEntryId, isSendingFeedback, isResolvingEmail, isDrafting)
+  // activeFeedbackEntryId, isSendingFeedback, isResolvingEmail)
   // is now owned by useFeedbackComposition — see hook instantiation below.
-  const [account, setAccount] = useState<any | null>(() => {
-    const saved = sessionStorage.getItem('msal_account');
-    return saved ? JSON.parse(saved) : null;
+  const collaborationAccess = useCollaborationAccessController();
+  const { account, profile: accessProfile, status: accessStatus } = collaborationAccess;
+  const accessIdentity = account?.localAccountId || null;
+  const accessReady = accessStatus === 'ready' && Boolean(accessProfile?.allowed && accessIdentity);
+  useSessionKeepAlive({
+    signedIn: accessReady,
+    onSessionEnded: () => { void collaborationAccess.refresh(); },
   });
-  const [accessToken, setAccessToken] = useState<string | null>(() => {
-    return sessionStorage.getItem('msal_token');
-  });
+  // Existing child APIs use accessToken presence as their Microsoft-connected
+  // signal. This marker is not a bearer token; GraphService routes it through the
+  // same-origin proxy, where the real token remains in the server session.
+  const accessToken: string | null = account ? 'server-session-proxy' : null;
   const [logs, setLogs] = useState<string[]>([]);
   const [isInteracting, setIsInteracting] = useState(false);
   const hasDebugActivity = logs.length > 0 || isInteracting;
-  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const isCheckingAuth = accessStatus === 'loading';
   const [hasGeminiKey, setHasGeminiKey] = useState(true);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  // Microsoft identity carried on the Firebase sign-in (Track B, ARCHITECTURE §46).
+  const identityBinding = useIdentityBinding(
+    firebaseUser,
+    account?.username,
+    accessProfile?.allowed ? accessProfile : null
+  );
+  // Interns see and sync only their assigned diary groups (services/internScope.ts).
+  // Read through refs by the async tree and sync code, which outlive renders.
+  const internGroupScope = useInternGroupScope(
+    db,
+    identityBinding.status === 'bound' ? identityBinding.claims : null
+  );
+  const groupScopeRef = useRef(internGroupScope.scope);
+  groupScopeRef.current = internGroupScope.scope;
+  const groupScopeReadyRef = useRef(internGroupScope.ready);
+  groupScopeReadyRef.current = internGroupScope.ready;
+  /** Limit each class's diary sections to the user's group scope (diary mode only). */
+  const scopeClassTree = (tree: NotebookNode[], mode: 'diary' | 'assignments'): NotebookNode[] =>
+    mode !== 'diary'
+      ? tree
+      : tree.map((classNode) => ({
+          ...classNode,
+          children: scopeNotebookStructure(classNode.children ?? [], classNode.id, groupScopeRef.current),
+        }));
 
   // Firestore teacher preferences — loaded early so userConfig merge is available
   // to all handlers. Migration from localStorage runs inside the hook on first load.
@@ -388,80 +435,12 @@ const App: React.FC = () => {
   }), [machineConfig, preferences]);
 
   const [dbStatus, setDbStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting');
-  const firestoreAutoConnectAttemptRef = useRef<string | null>(null);
 
-  const getFirestoreAutoConnectKey = (nextAccount: any | null): string | null =>
+  const getAccountKey = (nextAccount: any | null): string | null =>
     nextAccount?.homeAccountId || nextAccount?.localAccountId || nextAccount?.username || null;
-
-  const markFirestoreAutoConnectAttempted = (nextAccount: any | null) => {
-    const key = getFirestoreAutoConnectKey(nextAccount);
-    if (!key) return;
-    firestoreAutoConnectAttemptRef.current = key;
-    sessionStorage.setItem(`firestore_auto_connect:${key}`, '1');
-  };
-
-  const clearFirestoreAutoConnectAttempt = (nextAccount: any | null) => {
-    const key = getFirestoreAutoConnectKey(nextAccount);
-    if (!key) return;
-    if (firestoreAutoConnectAttemptRef.current === key) {
-      firestoreAutoConnectAttemptRef.current = null;
-    }
-    sessionStorage.removeItem(`firestore_auto_connect:${key}`);
-  };
-
-  const hasAttemptedFirestoreAutoConnect = (nextAccount: any | null): boolean => {
-    const key = getFirestoreAutoConnectKey(nextAccount);
-    if (!key) return false;
-    return (
-      firestoreAutoConnectAttemptRef.current === key ||
-      sessionStorage.getItem(`firestore_auto_connect:${key}`) === '1'
-    );
-  };
 
   // --- Firebase Auth ---
   useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const res = await fetch('/api/auth/me');
-        if (res.ok) {
-          const data = await res.json();
-          setAccount(data.account);
-          addLog(`Connected: ${data.account.username}`);
-        }
-      } catch (e) {
-        console.error("Auth check failed", e);
-      } finally {
-        setIsCheckingAuth(false);
-      }
-    };
-
-    checkAuth();
-
-    const handleMessage = (event: MessageEvent) => {
-      // Only trust auth messages from our own origin. The OAuth callback popup is
-      // served by this same Express server (/auth/callback), so a legitimate
-      // OAUTH_AUTH_SUCCESS always arrives same-origin. Rejecting other origins
-      // closes the token-injection / token-theft vector that an unvalidated
-      // listener would otherwise expose if the app were ever framed or opened
-      // by another window.
-      if (event.origin !== window.location.origin) return;
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        if (event.data.account) {
-          setAccount(event.data.account);
-          if (event.data.accessToken) {
-            setAccessToken(event.data.accessToken);
-            sessionStorage.setItem('msal_account', JSON.stringify(event.data.account));
-            sessionStorage.setItem('msal_token', event.data.accessToken);
-          }
-          addLog(`Connected: ${event.data.account.username}`);
-          setIsCheckingAuth(false);
-        } else {
-          checkAuth();
-        }
-      }
-    };
-    window.addEventListener('message', handleMessage);
-
     async function testConnection(retries = 3) {
       try {
         setDbStatus('connecting');
@@ -526,23 +505,18 @@ const App: React.FC = () => {
 
     return () => {
       unsubscribe();
-      window.removeEventListener('message', handleMessage);
     };
   }, []);
 
-  const handleFirebaseLogin = async (options?: { autoTrigger?: boolean }) => {
+  const handleFirebaseLogin = async () => {
     try {
       if (auth.currentUser) return;
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
-      addLog(options?.autoTrigger ? "Connected to Firestore automatically." : "Connected to Firebase Database.");
+      addLog("Connected to Firebase Database.");
     } catch (error: any) {
       console.error("Firebase login error:", error);
-      if (options?.autoTrigger) {
-        addLog(`Automatic Firestore sign-in did not complete: ${error?.message || String(error)}. You can still use Connect Firestore manually.`);
-      } else {
-        setError(`Database Auth Error: ${error.message}`);
-      }
+      setError(`Database Auth Error: ${error.message}`);
     }
   };
 
@@ -554,15 +528,6 @@ const App: React.FC = () => {
       console.error("Firebase logout error:", error);
     }
   };
-
-  useEffect(() => {
-    if (!account || firebaseUser) return;
-    if (hasAttemptedFirestoreAutoConnect(account)) return;
-
-    markFirestoreAutoConnectAttempted(account);
-    addLog('Microsoft connected. Attempting Firestore sign-in...');
-    void handleFirebaseLogin({ autoTrigger: true });
-  }, [account, firebaseUser]);
 
   // --- Gemini Key Check ---
   useEffect(() => {
@@ -584,7 +549,8 @@ const App: React.FC = () => {
 
   // --- Data State ---
   const [syncMode, setSyncMode] = useState<'diary' | 'assignments'>('diary');
-  const [showAllNotebooks, setShowAllNotebooks] = useState(false);
+  // Bumped when a sync finishes so the Class Dashboard reloads what changed.
+  const [savedDataVersion, setSavedDataVersion] = useState(0);
   const [selectedNotebookIds, setSelectedNotebookIds] = useState<Set<string>>(new Set());
   const [classes, setClasses] = useState<EducationClass[]>([]);
   const [lastDiscoveryAt, setLastDiscoveryAt] = useState<string | null>(null);
@@ -602,22 +568,51 @@ const App: React.FC = () => {
   const [lastParseFailureMode, setLastParseFailureMode] = useState<ParserMode | null>(null);
   const [syncingClassId, setSyncingClassId] = useState<string | null>(null);
 
-  const selectedNotebookStorageKey = `selected_notebooks_${syncMode}`;
-  const discoveredClassesStorageKey = `discovered_classes_${syncMode}`;
+  const selectedNotebookStorageKey = accessIdentity
+    ? buildAccountStorageKey('selected_notebooks', accessIdentity, syncMode)
+    : null;
+  const discoveredClassesStorageKey = accessIdentity
+    ? buildAccountStorageKey('discovered_classes', accessIdentity, syncMode)
+    : null;
+  const notebookTreeStorageKey = accessIdentity
+    ? buildAccountStorageKey('notebook_tree_v1', accessIdentity, syncMode)
+    : null;
   
+  // The Firebase uid whose roster has been loaded in this session. The roster
+  // (users/{uid}/roster) is the saved class selection, and the save effect below
+  // deletes roster docs for unselected classes — so it must never run before the
+  // roster has been loaded for the signed-in user. Otherwise a stale local
+  // selection, restored while Firebase sign-in was still pending, overwrote the
+  // saved roster the moment sign-in completed (seen 2026-10-06: three of four
+  // classes unticked on opening the hosted app).
+  const rosterLoadedForUidRef = useRef<string | null>(null);
+
   // Load persisted selection when mode changes
   useEffect(() => {
     const loadRoster = async () => {
+      if (!accessReady || !accessProfile) {
+        setSelectedNotebookIds(new Set());
+        setClasses([]);
+        return;
+      }
       const cachedClasses = loadDiscoveredClassesCache();
       if (firebaseUser) {
         try {
           const rosterRef = collection(db, 'users', firebaseUser.uid, 'roster');
           const snapshot = await getDocs(rosterRef);
           recordRead('roster:load', snapshot.size);
-          const ids = snapshot.docs.map(doc => doc.id);
+          const ids = filterClassIdsForAccess(snapshot.docs.map(doc => doc.id), accessProfile);
           setSelectedNotebookIds(new Set(ids));
+          // From here on, selection changes for this user may be saved back.
+          lastRosterSyncSigRef.current = `${firebaseUser.uid}|${buildAccessSelectionSignature(
+            accessIdentity,
+            accessProfile,
+            syncMode,
+            ids
+          )}`;
+          rosterLoadedForUidRef.current = firebaseUser.uid;
           
-          const savedClasses = snapshot.docs.map(doc => {
+          const savedClasses = filterClassesForAccess(snapshot.docs.map(doc => {
             const data = doc.data();
             return withClassDefaults({
               id: data.classId,
@@ -626,7 +621,7 @@ const App: React.FC = () => {
               accessStatus: 'accessible' as const,
               rosterStatus: 'saved' as const,
             });
-          });
+          }), accessProfile);
           const metadataMap = await loadClassMetadataMap(db, firebaseUser.uid, ids);
           const identityMap = await loadClassStudentIdentityMap(db, firebaseUser.uid, ids);
           const mergedSavedClasses = mergeClassMetadata(savedClasses, metadataMap).map((cls) => ({
@@ -644,10 +639,12 @@ const App: React.FC = () => {
         classIdentityMapRef.current = {};
         classIdentityLoadedRef.current = {};
         studentIdentityCacheRef.current = {};
-        const saved = localStorage.getItem(selectedNotebookStorageKey);
+        const saved = selectedNotebookStorageKey
+          ? localStorage.getItem(selectedNotebookStorageKey)
+          : null;
         if (saved) {
           try {
-            setSelectedNotebookIds(new Set(JSON.parse(saved)));
+            setSelectedNotebookIds(new Set(filterClassIdsForAccess(JSON.parse(saved), accessProfile)));
           } catch (e) {
             setSelectedNotebookIds(new Set());
           }
@@ -658,24 +655,30 @@ const App: React.FC = () => {
       }
     };
     loadRoster();
-  }, [syncMode, firebaseUser]);
+  }, [syncMode, firebaseUser, accessIdentity, accessProfile?.resolvedAt, accessStatus]);
 
   // Save selection when it changes
   const lastRosterSyncSigRef = useRef<string>('');
   useEffect(() => {
-    localStorage.setItem(selectedNotebookStorageKey, JSON.stringify(Array.from(selectedNotebookIds)));
+    if (!accessReady || !accessProfile || !accessIdentity || !selectedNotebookStorageKey) return;
+    const allowedSelectedIds = filterClassIdsForAccess(selectedNotebookIds, accessProfile);
+    localStorage.setItem(selectedNotebookStorageKey, JSON.stringify(allowedSelectedIds));
 
     const saveRosterToFirebase = async () => {
       if (!firebaseUser) return;
+      if (rosterLoadedForUidRef.current !== firebaseUser.uid) return;
       
       try {
         const rosterRef = collection(db, 'users', firebaseUser.uid, 'roster');
         const snapshot = await getDocs(rosterRef);
         recordRead('roster:save-diff', snapshot.size);
-        const existingIds = new Set(snapshot.docs.map(doc => doc.id));
+        const existingIds = new Set(filterClassIdsForAccess(
+          snapshot.docs.map(doc => doc.id),
+          accessProfile
+        ));
         
         // Add new ones
-        for (const id of Array.from(selectedNotebookIds as Set<string>)) {
+        for (const id of allowedSelectedIds) {
           if (!existingIds.has(id)) {
             const cls = classes.find(c => c.id === id);
             if (cls) {
@@ -692,7 +695,7 @@ const App: React.FC = () => {
         
         // Remove unselected ones
         for (const id of Array.from(existingIds)) {
-          if (!selectedNotebookIds.has(id)) {
+          if (!allowedSelectedIds.includes(id)) {
             await deleteDoc(doc(rosterRef, id));
           }
         }
@@ -708,46 +711,59 @@ const App: React.FC = () => {
     // signature so a classes-only change does not re-read the whole roster collection.
     // The `classes.length > 0` guard still prevents wiping the roster on initial load.
     if (classes.length > 0) {
-      const selectionSig = `${firebaseUser?.uid || ''}|${syncMode}|${Array.from(selectedNotebookIds).sort().join(',')}`;
+      const selectionSig = `${firebaseUser?.uid || ''}|${buildAccessSelectionSignature(
+        accessIdentity,
+        accessProfile,
+        syncMode,
+        allowedSelectedIds
+      )}`;
       if (selectionSig !== lastRosterSyncSigRef.current) {
         lastRosterSyncSigRef.current = selectionSig;
         saveRosterToFirebase();
       }
     }
-  }, [selectedNotebookIds, syncMode, firebaseUser, classes]);
+  }, [selectedNotebookIds, syncMode, firebaseUser, classes, accessIdentity, accessProfile?.resolvedAt, accessStatus]);
 
   useEffect(() => {
-    if (classes.length > 0) {
+    if (accessReady && classes.length > 0) {
       saveDiscoveredClassesCache(classes, lastDiscoveryAt || undefined);
     }
-  }, [classes, discoveredClassesStorageKey, lastDiscoveryAt]);
+  }, [classes, discoveredClassesStorageKey, lastDiscoveryAt, accessReady]);
 
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [notebookTree, setNotebookTree] = useState<NotebookNode[]>([]);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
 
   useEffect(() => {
+    if (!accessReady || !accessProfile || !notebookTreeStorageKey) {
+      setNotebookTree([]);
+      setExpandedNodes(new Set());
+      return;
+    }
     try {
-      const raw = localStorage.getItem(`notebook_tree_${syncMode}_v1`);
+      const raw = localStorage.getItem(notebookTreeStorageKey);
       if (!raw) return;
       const { tree, savedAt } = JSON.parse(raw) as { tree: NotebookNode[]; savedAt: number };
       if (Date.now() - savedAt > 24 * 60 * 60 * 1000) return;
-      setNotebookTree(tree);
+      const scopedTree = scopeClassTree(filterClassesForAccess(tree, accessProfile), syncMode);
+      setNotebookTree(scopedTree);
       const expanded = new Set<string>();
-      tree.forEach((nb: NotebookNode) => {
+      scopedTree.forEach((nb: NotebookNode) => {
         expanded.add(nb.id);
         nb.children?.forEach((sg: NotebookNode) => expanded.add(sg.id));
       });
       setExpandedNodes(expanded);
     } catch { /* malformed cache — ignore */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncMode]);
+  }, [syncMode, notebookTreeStorageKey, accessProfile?.resolvedAt, accessStatus]);
   const [selectedPageContent, setSelectedPageContent] = useState<string | null>(null);
   const [parsedPageContent, setParsedPageContent] = useState<ParsedPageContent | null>(null);
   const [parsedCache, setParsedCache] = useState<Record<string, ParsedPageContent>>({});
   const [contentCache, setContentCache] = useState<Record<string, string>>({});
   const [teacherFeedback, setTeacherFeedback] = useState<Record<string, TeacherFeedbackFields>>({}); // entryId -> fields
   const [activeFeedbackEntryIndex, setActiveFeedbackEntryIndex] = useState(0);
+  const [activeFeedbackFieldByEntry, setActiveFeedbackFieldByEntry] =
+    useState<Record<string, ContentFeedbackFieldKey>>({});
   const contentScrollRef = useRef<HTMLDivElement | null>(null);
   const [viewMode, setViewMode] = useState<'parsed' | 'raw'>('parsed');
   // aiPrompts now come from Firestore preferences (migrated in Slice 7b).
@@ -768,17 +784,24 @@ const App: React.FC = () => {
   const [syncProgress, setSyncProgress] = useState({ current: 0, total: 0, status: '' });
   const [resumePrompt, setResumePrompt] = useState<{ job: SyncJob; queued: number; rateLimited: number } | null>(null);
   const [markAllReadySuccess, setMarkAllReadySuccess] = useState(false);
-  const [openWarningPanel, setOpenWarningPanel] = useState<string | null>(null);
   const [syncingPages, setSyncingPages] = useState(false);
   const [pageSyncStateCache, setPageSyncStateCache] = useState<Record<string, PageSyncState>>({});
 
-  const getClassParserConfig = (classId: string) => {
-    const cls = classes.find((item) => item.id === classId);
-    return {
-      parserMode: cls?.parserMode || DEFAULT_PARSER_MODE,
-      templateVersion: cls?.templateVersion || DEFAULT_TEMPLATE_VERSION,
-    };
-  };
+  useEffect(() => {
+    if (!accessProfile) return;
+    setSelectedNotebookIds((current) => new Set(filterClassIdsForAccess(current, accessProfile)));
+    setClasses((current) => filterClassesForAccess(current, accessProfile));
+    setNotebookTree((current) => filterClassesForAccess(current, accessProfile));
+    if (activeClassId && !collaborationAccess.isClassAllowed(activeClassId)) {
+      setActiveClassId('');
+      setActivePageId('');
+      setSelectedPageContent(null);
+      setParsedPageContent(null);
+    }
+  }, [accessProfile?.resolvedAt]);
+
+  const getClassParserConfig = (classId: string) =>
+    resolveClassParserConfig(classes.find((item) => item.id === classId));
 
   const mergeClassLists = (primary: EducationClass[], secondary: EducationClass[]) => {
     const merged = new Map<string, EducationClass>();
@@ -788,6 +811,10 @@ const App: React.FC = () => {
   };
 
   const loadDiscoveredClassesCache = (): EducationClass[] => {
+    if (!discoveredClassesStorageKey || !accessProfile) {
+      setLastDiscoveryAt(null);
+      return [];
+    }
     const cached = localStorage.getItem(discoveredClassesStorageKey);
     if (!cached) {
       setLastDiscoveryAt(null);
@@ -797,12 +824,12 @@ const App: React.FC = () => {
     try {
       const parsed = JSON.parse(cached) as { fetchedAt?: string; classes?: EducationClass[] };
       setLastDiscoveryAt(parsed.fetchedAt || null);
-      return (parsed.classes || []).map((cls) =>
+      return filterClassesForAccess((parsed.classes || []).map((cls) =>
         withClassDefaults({
           ...cls,
           rosterStatus: cls.rosterStatus || 'discovered',
         })
-      );
+      ), accessProfile);
     } catch {
       setLastDiscoveryAt(null);
       return [];
@@ -810,12 +837,14 @@ const App: React.FC = () => {
   };
 
   const saveDiscoveredClassesCache = (classList: EducationClass[], fetchedAtOverride?: string) => {
+    if (!discoveredClassesStorageKey || !accessProfile) return;
     const fetchedAt = fetchedAtOverride || new Date().toISOString();
+    const scopedClasses = filterClassesForAccess(classList, accessProfile);
     localStorage.setItem(
       discoveredClassesStorageKey,
       JSON.stringify({
         fetchedAt,
-        classes: classList.map((cls) => ({
+        classes: scopedClasses.map((cls) => ({
           id: cls.id,
           displayName: cls.displayName,
           description: cls.description,
@@ -851,7 +880,7 @@ const App: React.FC = () => {
   const studentIdentityCacheRef = useRef<Record<string, StudentIdentity | null>>({});
   const classIdentityMapRef = useRef<Record<string, ClassStudentIdentity[]>>({});
   const classIdentityLoadedRef = useRef<Record<string, boolean>>({});
-  const previousAccountKeyRef = useRef<string | null>(getFirestoreAutoConnectKey(account));
+  const previousAccountKeyRef = useRef<string | null>(getAccountKey(account));
 
   // The displayed stream stays capped at 50 (cheap to re-render). A larger ring
   // buffer lives in a ref — no re-renders — so the debug-log export carries real
@@ -867,6 +896,27 @@ const App: React.FC = () => {
     setLogs(prev => [line, ...prev].slice(0, 50));
   };
 
+  // Re-apply the group scope when it arrives after the tree was loaded or restored.
+  useEffect(() => {
+    if (internGroupScope.scope.kind !== 'groups') return;
+    setNotebookTree((current) => scopeClassTree(current, syncMode));
+    addLog('Showing and syncing your assigned diary groups only.');
+  }, [internGroupScope.scope]);
+
+  useEffect(() => {
+    if (internGroupScope.isIntern && internGroupScope.ready && internGroupScope.missingAssignment) {
+      addLog('No diary-group assignment is published for you yet, so whole classes are shown. Ask the course owner to save the intern list.');
+    }
+  }, [internGroupScope.ready, internGroupScope.missingAssignment]);
+
+  useEffect(() => {
+    if (identityBinding.status === 'bound' && identityBinding.claims) {
+      addLog(`Identity bound to Firebase sign-in: ${identityBinding.claims.ms_upn} (${identityBinding.claims.ms_role}).`);
+    } else if (identityBinding.status === 'error') {
+      addLog(`Identity binding failed: ${identityBinding.error}. Feedback still sends; attribution is not yet attested.`);
+    }
+  }, [identityBinding.status]);
+
   // Export the full buffered debug log (chronological) plus the session read
   // summary as a downloadable .txt — for attaching to a bug report.
   const handleSaveLog = () => {
@@ -876,6 +926,8 @@ const App: React.FC = () => {
       `User: ${firebaseUser?.email || account?.username || 'unknown'}`,
       '',
       formatReadSummary(),
+      '',
+      formatAiSummary(),
       '',
       `--- log (${logBufferRef.current.length} lines, oldest first) ---`,
       '',
@@ -1184,9 +1236,18 @@ const App: React.FC = () => {
 
   // Batch-load page sync states from Firestore when the notebook tree is populated.
   // This populates the tree-level dot badges without requiring each page to be opened first.
+  //
+  // Depends on the *class ids*, not on `notebookTree` itself: the tree gets a new
+  // object identity on every structure update, so during a multi-class sync this
+  // effect re-read every page record repeatedly (9.4k reads in one 28-minute
+  // session). The badge only needs re-reading when the set of classes changes.
+  const notebookTreeClassKey = useMemo(
+    () => notebookTree.map(nb => nb.id).sort().join('|'),
+    [notebookTree]
+  );
   useEffect(() => {
-    if (!firebaseUser || notebookTree.length === 0) return;
-    const classIds = notebookTree.map(nb => nb.id);
+    if (!firebaseUser || !notebookTreeClassKey) return;
+    const classIds = notebookTreeClassKey.split('|');
     listPageSyncRecordsForClasses(db, firebaseUser.uid, classIds)
       .then(records => {
         setPageSyncStateCache(prev => {
@@ -1196,7 +1257,7 @@ const App: React.FC = () => {
         });
       })
       .catch(err => console.warn('Failed to load page sync states for tree:', err));
-  }, [notebookTree, firebaseUser]);
+  }, [notebookTreeClassKey, firebaseUser]);
 
   const ensureUniqueEntryIds = (pageId: string, parsedEntries: ParsedPageContent): ParsedPageContent => {
     const usedIds = new Set<string>();
@@ -1362,6 +1423,13 @@ const App: React.FC = () => {
   const extractGraphRetryDelayMs = (error: any): number => {
     if (typeof error?.retryAfterMs === 'number' && Number.isFinite(error.retryAfterMs)) {
       return Math.max(5000, error.retryAfterMs);
+    }
+    // Prefer the server's own Retry-After, read by the Graph layer so App.tsx
+    // does not learn header parsing. OneNote does not send it, so the fallback
+    // below stays the normal path for diary syncs.
+    const headerRetryAfterMs = getGraphRetryAfterMs(error);
+    if (headerRetryAfterMs !== null) {
+      return Math.max(5000, headerRetryAfterMs);
     }
 
     return extractRetryDelayMs(error) ?? 60000;
@@ -1616,6 +1684,7 @@ const App: React.FC = () => {
   };
 
   const openExportDialog = () => {
+    if (!accessProfile?.capabilities.canExport) return;
     if (classWorkspaceUnavailableReason) {
       setError(classWorkspaceUnavailableReason);
       return;
@@ -1624,7 +1693,7 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    const accountKey = getFirestoreAutoConnectKey(account);
+    const accountKey = getAccountKey(account);
     const wasDisconnected = previousAccountKeyRef.current === null;
     if (accountKey && wasDisconnected) {
       setSidebarCollapsedPersisted(false);
@@ -1717,6 +1786,8 @@ const App: React.FC = () => {
     lastViewedAt,
     lastError,
     nextRetryAt,
+    contentHash,
+    lastReadAt,
   }: Omit<PageSyncRecord, 'updatedAt'>) => {
     if (!firebaseUser) return;
 
@@ -1748,6 +1819,8 @@ const App: React.FC = () => {
         lastViewedAt,
         lastError,
         nextRetryAt,
+        contentHash,
+        lastReadAt,
         updatedAt: new Date().toISOString(),
       });
       setPageSyncStateCache(prev => ({ ...prev, [pageId]: syncState }));
@@ -1859,7 +1932,7 @@ const App: React.FC = () => {
 
   // --- Handlers ---
   const handleLogin = async () => {
-    if (isInteracting) return;
+    if (isInteracting) return null;
     
     setIsInteracting(true);
     setError(null);
@@ -1879,9 +1952,11 @@ const App: React.FC = () => {
       if (!authWindow) {
         setError("Popup blocked. Please allow popups for this site.");
       }
+      return authWindow;
     } catch (e: any) {
       addLog(`Auth Failed: ${e.message}`);
       setError(`Auth Error: ${e.message}`);
+      return null;
     } finally {
       setIsInteracting(false);
     }
@@ -1889,12 +1964,11 @@ const App: React.FC = () => {
 
   const handleLogout = async () => {
     try {
+      // Clear the identity claims while the Firebase sign-in is still here, so
+      // the next person on this browser cannot inherit them.
+      await identityBinding.unbind();
       await fetch('/api/auth/logout');
-      clearFirestoreAutoConnectAttempt(account);
-      setAccount(null);
-      setAccessToken(null);
-      sessionStorage.removeItem('msal_account');
-      sessionStorage.removeItem('msal_token');
+      collaborationAccess.clear();
       setClasses([]);
       setEntries([]);
       setNotebookTree([]);
@@ -1947,6 +2021,10 @@ const App: React.FC = () => {
       setLoading(false);
       return setError("Please sign in first.");
     }
+    if (!accessReady || !accessProfile?.capabilities.canSync) {
+      setLoading(false);
+      return setError("Your Microsoft account is not assigned to notebook sync access.");
+    }
 
     if (!ensureGraphReady('notebook discovery')) {
       setLoading(false);
@@ -1962,7 +2040,7 @@ const App: React.FC = () => {
       
       // Default all discovered items to 'accessible' initially to avoid blocking discovery.
       // We will handle access errors gracefully during the sync phase.
-      const initialClasses = fetched.map(cls =>
+      const initialClasses = filterClassesForAccess(fetched, accessProfile).map(cls =>
         withClassDefaults({
           ...cls,
           accessStatus: 'accessible' as const,
@@ -2000,7 +2078,10 @@ const App: React.FC = () => {
         classesWithMetadata = mergeClassMetadata(initialClasses, mergedMeta);
       }
       
-      const mergedClasses = mergeClassLists(classesWithMetadata, classes);
+      const mergedClasses = filterClassesForAccess(
+        mergeClassLists(classesWithMetadata, classes),
+        accessProfile
+      );
       setClasses(mergedClasses);
       saveDiscoveredClassesCache(mergedClasses);
       
@@ -2094,7 +2175,9 @@ const App: React.FC = () => {
           if (!cls) return null;
           
           addLog(`Fetching structure for ${cls.displayName} in ${syncMode} mode...`);
-          const tree = await graph.getNotebookStructure(cls.id, syncMode);
+          const tree = syncMode === 'diary'
+            ? scopeNotebookStructure(await graph.getNotebookStructure(cls.id, syncMode), cls.id, groupScopeRef.current)
+            : await graph.getNotebookStructure(cls.id, syncMode);
           requestCount++;
           
           return {
@@ -2110,10 +2193,12 @@ const App: React.FC = () => {
       
       setNotebookTree(combinedTree);
       try {
-        localStorage.setItem(
-          `notebook_tree_${syncMode}_v1`,
-          JSON.stringify({ tree: combinedTree, savedAt: Date.now() })
-        );
+        if (notebookTreeStorageKey) {
+          localStorage.setItem(
+            notebookTreeStorageKey,
+            JSON.stringify({ tree: combinedTree, savedAt: Date.now() })
+          );
+        }
       } catch { /* localStorage full — non-critical */ }
       setGraphCooldownUntil(null);
 
@@ -2211,9 +2296,6 @@ const App: React.FC = () => {
 
   const [activeStudentName, setActiveStudentName] = useState<string>('Student');
   const [activeStudentUpn, setActiveStudentUpn] = useState<string>('');
-  const [pastFeedbackForStudent, setPastFeedbackForStudent] = useState<FeedbackHistoryRecord[]>([]);
-  const [isLoadingPastFeedback, setIsLoadingPastFeedback] = useState(false);
-
   const [ffItemCount, setFfItemCount] = useState<FFItemCount>('3-4');
   const [priorFeedback, setPriorFeedback] = useState<PriorFeedbackMode>('off');
   const [prefsApplied, setPrefsApplied] = useState(false);
@@ -2227,38 +2309,35 @@ const App: React.FC = () => {
     }
   }, [preferencesLoading, prefsApplied, preferences]);
 
-  // Fetch recent feedback for the active student. Queries by (classId, studentUpn) once
-  // the UPN is resolved from the PageSyncRecord so history spans all pages for this student,
-  // not just the current page. Falls back to the page-scoped query for unresolved pages
-  // (e.g. owner accounts not in the class roster).
-  useEffect(() => {
-    if (!firebaseUser || !activePageId) {
-      setPastFeedbackForStudent([]);
-      return;
-    }
-    let cancelled = false;
-    setIsLoadingPastFeedback(true);
-    (async () => {
-      try {
-        const records = activeClassId && activeStudentUpn
-          ? await fetchRecentFeedbackForStudent(db, firebaseUser.uid, activeClassId, activeStudentUpn, 5)
-          : await fetchRecentFeedbackForPage(db, firebaseUser.uid, activePageId, 5);
-        if (cancelled) return;
-        setPastFeedbackForStudent(records);
-      } catch (e: any) {
-        if (cancelled) return;
-        addLog(`[PastFeedback] Error: ${e?.message || String(e)}`);
-        console.error('Could not load past feedback for student', e);
-        setPastFeedbackForStudent([]);
-      } finally {
-        if (!cancelled) setIsLoadingPastFeedback(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firebaseUser?.uid, activePageId, activeClassId, activeStudentUpn]);
+  const {
+    records: pastFeedbackForStudent,
+    isLoading: isLoadingPastFeedback,
+    setRecords: setPastFeedbackRecords,
+  } = usePastFeedbackForStudent({
+    db,
+    uid: firebaseUser?.uid,
+    activePageId,
+    activeClassId,
+    activeStudentUpn,
+    addLog,
+  });
+
+  const aiReview = useAiReviewSession({
+    firebaseUser,
+    addLog,
+    accessProfile,
+    aiReviewConfigured: collaborationAccess.aiReviewConfigured === true,
+    microsoftSignedIn: !!account,
+    microsoftUpn: account?.username ?? null,
+    bindingStatus: identityBinding.status,
+    preferences,
+    priorFeedback,
+    ffItemCount,
+    pastFeedbackForStudent,
+    isLoadingPastFeedback: isLoadingPastFeedback,
+    activeClassId,
+    activePageId,
+  });
 
   // Stable callback the feedback composition hook can use to invoke
   // saveEntryToFirebase. The actual function is defined further down so
@@ -2273,6 +2352,16 @@ const App: React.FC = () => {
       ) => Promise<void>)
     | null
   >(null);
+  const runAiReviewAction = useAiReviewActions({
+    recoverMicrosoft: () => recoverAiReviewMicrosoftSignIn({
+      openSignIn: handleLogin,
+      isSignInBusy: () => isInteracting,
+      refresh: () => collaborationAccess.refresh({ force: true }),
+    }),
+    recoverGoogle: () => recoverAiReviewGoogleSignIn({ currentUser: () => auth.currentUser, openSignIn: handleFirebaseLogin }),
+    retryBinding: () => identityBinding.retry(),
+    canSaveDraft: () => !!firebaseUser && !!saveEntryRef.current,
+  });
   const saveEntryFromHook = useCallback(
     async (entry: ParsedDiaryEntry, entryIndex: number, status: EntryStatus) => {
       if (saveEntryRef.current) {
@@ -2285,7 +2374,7 @@ const App: React.FC = () => {
   const handleMarkUptake = async (feedbackId: string, observed: boolean) => {
     if (!firebaseUser) return;
     await markFeedbackUptake(db, firebaseUser.uid, feedbackId, observed);
-    setPastFeedbackForStudent(prev =>
+    setPastFeedbackRecords(prev =>
       prev.map(r => r.feedbackId === feedbackId
         ? { ...r, uptakeObservedAt: observed ? new Date().toISOString() : null }
         : r
@@ -2302,13 +2391,11 @@ const App: React.FC = () => {
     isResolvingEmail,
     emailResolutionSource,
     markEmailManuallyEdited,
-    isDrafting,
     batchEntryOptions,
     includedBatchPreviewItems,
     updateBatchEntryDecision,
     reviewAndSend: handleReviewAndSend,
     sendFeedback: handleSendFeedback,
-    draftFeedback: handleDraftFeedback,
     closeModal: closeFeedbackModal,
     savedTeacherFeedback,
     setSavedTeacherFeedback,
@@ -2321,6 +2408,8 @@ const App: React.FC = () => {
     handleReviewAndSendEntry,
   } = useFeedbackComposition({
     accessToken,
+    accessProfile: collaborationAccess.profile,
+    identityClaims: identityBinding.status === 'bound' ? identityBinding.claims : null,
     firebaseUser,
     db,
     account,
@@ -2338,8 +2427,9 @@ const App: React.FC = () => {
     ffItemCount,
     priorFeedback,
     pastFeedbackForStudent,
+    getAiReviewRefsForEntry: aiReview.getAiReviewRefsForEntry,
     onFeedbackHistorySaved: (record) => {
-      setPastFeedbackForStudent(prev =>
+      setPastFeedbackRecords(prev =>
         [record, ...prev.filter(item => item.feedbackId !== record.feedbackId)].slice(0, 5)
       );
     },
@@ -2684,6 +2774,18 @@ const App: React.FC = () => {
               }
             } catch (parseError: any) {
               parseFailureMode = 'ai';
+              // A retired/unknown model fails every page identically. Say so
+              // plainly instead of letting it read as an unparseable page.
+              if (!isGeminiAvailable()) {
+                // The hosted pilot has no Gemini key by design; the developer
+                // wording in parseError ("set .env.local") means nothing to an intern.
+                const message = "AI parsing isn't available in this version of the app. Pages in the labeled diary template load with the Labels parser; for a page that doesn't, give feedback directly in OneNote and note which page it was.";
+                addLog(`AI parsing unavailable: ${parseError.message}`);
+                setError(message);
+              } else if (isGeminiModelUnavailableError(parseError)) {
+                addLog(`AI parsing unavailable: ${parseError.message} Choose a current model in Settings › AI & Parser.`);
+                setError(`${parseError.message} Choose a current model in Settings › AI & Parser.`);
+              }
               if (firebaseUser) {
                 await persistPageSyncState({
                   pageId,
@@ -2742,6 +2844,7 @@ const App: React.FC = () => {
             newStatus,
             newSavedFeedback
           );
+          parsed = orderDiaryEntriesForDisplay(parsed);
           setTeacherFeedback(remappedFeedback);
           setSavedTeacherFeedback(remappedSavedFeedback);
           setEntryStatus(remappedStatus);
@@ -2862,7 +2965,10 @@ const App: React.FC = () => {
     oneNoteLastModified?: string,
     parserConfigOverride?: { parserMode: ParserMode; templateVersion: TemplateVersion },
     identityOverride?: StudentIdentity | null,
-    diaryGroupOverride?: { id?: string; name?: string }
+    diaryGroupOverride?: { id?: string; name?: string },
+    // Sync passes the entry's existing review state so a content re-read never
+    // resets status or feedback; see services/syncReviewPreservation.ts.
+    preservedReview?: ReviewState
   ) => {
     if (!firebaseUser) {
       addLog("Cannot save entry: Database not connected.");
@@ -2882,7 +2988,7 @@ const App: React.FC = () => {
     const studentIdentity =
       identityOverride ||
       (await resolveStudentIdentityForClass([pTitle, sName].filter(Boolean).join(' ').trim(), cId));
-    const storedEntry = buildStoredEntry({
+    const builtEntry = buildStoredEntry({
       entry: {
         ...entry,
         id: entry.id || `${pId}_${entryIndex}`,
@@ -2901,17 +3007,20 @@ const App: React.FC = () => {
       templateVersion: parserConfig.templateVersion,
       oneNoteLastModified,
     });
+    const storedEntry = withPreservedReview(builtEntry, preservedReview);
 
     const entryPath = `users/${firebaseUser.uid}/entries/${storedEntry.entryId}`;
     try {
       await saveEntryRecord(db, firebaseUser.uid, storedEntry);
-      setEntryStatus(prev => ({ ...prev, [entryKey]: status, [storedEntry.entryId]: status }));
+      setEntryStatus(prev => ({ ...prev, [entryKey]: storedEntry.status, [storedEntry.entryId]: storedEntry.status }));
+      // Mirror what was actually written: with a preserved review, that is the
+      // stored feedback and status, not the open page's in-memory values.
       setSavedTeacherFeedback(prev => ({
         ...prev,
-        [entryKey]: feedback,
-        [storedEntry.entryId]: feedback,
+        [entryKey]: storedEntry.teacherFeedback,
+        [storedEntry.entryId]: storedEntry.teacherFeedback,
       }));
-      addLog(`Saved entry ${storedEntry.entryId} as ${getEntryWorkflowLogLabel(status)}.`);
+      addLog(`Saved entry ${storedEntry.entryId} as ${getEntryWorkflowLogLabel(storedEntry.status)}.`);
     } catch (error) {
       handleFirestoreError(error, "WRITE", entryPath);
     }
@@ -2939,6 +3048,12 @@ const App: React.FC = () => {
   ): Promise<{ queued: number; skipped: number; preserved: number }> => {
     if (!firebaseUser) throw new Error('Not authenticated');
 
+    const existingClassRecords = await listPageSyncRecordsForClasses(
+      db,
+      firebaseUser.uid,
+      [classId]
+    );
+
     if (!classId.startsWith('nb_')) {
       setSyncProgress(prev => ({ ...prev, status: 'Refreshing class identity map...' }));
       try {
@@ -2958,7 +3073,12 @@ const App: React.FC = () => {
     }
 
     setSyncProgress(prev => ({ ...prev, status: 'Fetching student roster...' }));
-    const structure = await graph.getNotebookStructure(classId);
+    // An intern's sync covers only their groups; wait until the scope is known
+    // rather than sync whole classes by mistake.
+    if (accessProfile?.role === 'intern' && !groupScopeReadyRef.current) {
+      throw new Error('Your diary-group assignment is still loading. Try the sync again in a moment.');
+    }
+    const structure = scopeNotebookStructure(await graph.getNotebookStructure(classId), classId, groupScopeRef.current);
     const studentSections = structure.flatMap(sg =>
       (sg.children || []).map(section => ({
         section,
@@ -2970,6 +3090,9 @@ const App: React.FC = () => {
 
     const parserConfig = getClassParserConfig(classId);
     const allItems: SyncJobItem[] = [];
+    const discoveredPageIds = new Set<string>();
+    const successfullyListedSectionIds = new Set<string>();
+    let discoveryComplete = true;
 
     await batchPromises(studentSections, async ({ section, diaryGroupId, diaryGroupName }) => {
       const currentIndex = studentSections.findIndex(s => s.section.id === section.id);
@@ -2977,7 +3100,54 @@ const App: React.FC = () => {
 
       try {
         const pages = await graph.getSectionPages(classId, section.id);
-        const pagesToSync = pages.filter(p => p.displayName && p.displayName.trim().length > 0);
+        const sectionErrorPageId = `error-${section.id}`;
+        const sectionLoadError = pages.find(isSectionPageLoadError);
+
+        if (sectionLoadError) {
+          discoveryComplete = false;
+          await savePageSyncRecord(db, firebaseUser.uid, {
+            pageId: sectionErrorPageId,
+            classId,
+            recordKind: 'section_error',
+            pageTitle: sectionLoadError.displayName,
+            studentName: section.displayName,
+            diaryGroupId,
+            diaryGroupName,
+            parserMode: parserConfig.parserMode,
+            templateVersion: parserConfig.templateVersion,
+            syncState: 'error',
+            entryCount: 0,
+            lastError: sectionLoadError.displayName,
+            updatedAt: new Date().toISOString(),
+          });
+          addLog(`Could not list pages for ${section.displayName}: ${sectionLoadError.displayName}.`);
+        } else {
+          successfullyListedSectionIds.add(section.id);
+          pages.forEach((page) => discoveredPageIds.add(page.id));
+          const previousSectionError = await fetchPageSyncRecord(
+            db,
+            firebaseUser.uid,
+            sectionErrorPageId
+          );
+          if (previousSectionError) {
+            await deletePageSyncRecord(db, firebaseUser.uid, sectionErrorPageId);
+            addLog(`Resolved the page-list capture error for ${section.displayName}.`);
+          }
+        }
+
+        const skippedPages = pages.filter(isUntitledPageCapturePlaceholder);
+        for (const skippedPage of skippedPages) {
+          const existingRecord = await fetchPageSyncRecord(db, firebaseUser.uid, skippedPage.id);
+          if (existingRecord?.syncState === 'error' && existingRecord.entryCount === 0) {
+            await deletePageSyncRecord(db, firebaseUser.uid, skippedPage.id);
+            addLog(`Removed non-diary capture record: ${section.displayName} / ${skippedPage.displayName}.`);
+          } else {
+            addLog(`Skipped non-diary page: ${section.displayName} / ${skippedPage.displayName}.`);
+          }
+        }
+        const pagesToSync = pages.filter(
+          p => p.displayName && p.displayName.trim().length > 0 && !shouldSkipPageCapture(p)
+        );
 
         for (const page of pagesToSync) {
           const sectionIdentity = matchStudentIdentityFromRoster(
@@ -2988,13 +3158,18 @@ const App: React.FC = () => {
 
           let initialStatus: SyncJobItemStatus = 'queued';
 
-          if (!forceResync && pageSyncRecord?.syncState === 'saved') {
-            const oneNoteModified = parseComparableTime(page.lastModified);
-            const firebaseModified = parseComparableTime(pageSyncRecord.oneNoteLastModified) ?? 0;
-            if (oneNoteModified !== null && firebaseModified > 0 && oneNoteModified <= firebaseModified) {
-              initialStatus = 'skipped';
-              addLog(`Discovering ${section.displayName} / ${page.displayName}: Up to date. Skipping.`);
-            }
+          // OneNote's modified date is unreliable for template-copied pages, so
+          // label-first pages are re-read on a refresh window and after a parser
+          // revision; see services/pageFreshness.ts.
+          const queueDecision = decidePageQueue({
+            parserMode: parserConfig.parserMode,
+            forceResync,
+            record: pageSyncRecord,
+            oneNoteLastModified: page.lastModified,
+          });
+          if (!queueDecision.queue) {
+            initialStatus = 'skipped';
+            addLog(`Discovering ${section.displayName} / ${page.displayName}: Up to date. Skipping.`);
           }
 
           if (
@@ -3023,12 +3198,14 @@ const App: React.FC = () => {
             parserMode: parserConfig.parserMode,
             templateVersion: parserConfig.templateVersion,
             oneNoteLastModified: page.lastModified,
+            ...(forceResync ? { forceReparse: true } : {}),
             status: initialStatus,
             createdAt: now,
             updatedAt: now,
           });
         }
       } catch (err: any) {
+        discoveryComplete = false;
         if (isGraphRateLimitError(err)) {
           const graphPausedUntil = startGraphCooldown(err, `discovering ${section.displayName}`);
           addLog(`Error discovering ${section.displayName}: ${formatGraphCooldownMessage(graphPausedUntil)}`);
@@ -3041,6 +3218,43 @@ const App: React.FC = () => {
         addLog(`Error discovering ${section.displayName}: ${err.message}`);
       }
     }, batchSize, delayMs);
+
+    const reconciliation = planPageRecordReconciliation(
+      existingClassRecords,
+      discoveredPageIds,
+      {
+        // A group-scoped (intern) sync lists only some sections, so it never
+        // counts as complete discovery: records in other groups are left alone
+        // rather than retired as missing.
+        classDiscoveryComplete: discoveryComplete && groupScopeRef.current.kind === 'all',
+        successfullyListedSectionIds,
+      }
+    );
+    const orphanedAt = new Date().toISOString();
+    await Promise.all([
+      ...reconciliation.deletePageIds.map((pageId) =>
+        deletePageSyncRecord(db, firebaseUser.uid, pageId)
+      ),
+      ...reconciliation.markOrphanedPageIds.map((pageId) =>
+        setPageSyncRecordOrphanedAt(db, firebaseUser.uid, pageId, orphanedAt)
+      ),
+      ...reconciliation.restorePageIds.map((pageId) =>
+        setPageSyncRecordOrphanedAt(db, firebaseUser.uid, pageId)
+      ),
+    ]);
+
+    if (reconciliation.deletePageIds.length > 0) {
+      addLog(`Removed ${reconciliation.deletePageIds.length} empty page record${reconciliation.deletePageIds.length === 1 ? '' : 's'} no longer present in OneNote.`);
+    }
+    if (reconciliation.markOrphanedPageIds.length > 0) {
+      addLog(`Archived ${reconciliation.markOrphanedPageIds.length} evidence-bearing page record${reconciliation.markOrphanedPageIds.length === 1 ? '' : 's'} no longer present in OneNote.`);
+    }
+    if (reconciliation.restorePageIds.length > 0) {
+      addLog(`Restored ${reconciliation.restorePageIds.length} page record${reconciliation.restorePageIds.length === 1 ? '' : 's'} found again in OneNote.`);
+    }
+    if (reconciliation.deferredPageIds.length > 0) {
+      addLog(`Deferred reconciliation for ${reconciliation.deferredPageIds.length} page record${reconciliation.deferredPageIds.length === 1 ? '' : 's'} belonging to failed or unknown sections.`);
+    }
 
     setSyncProgress(prev => ({ ...prev, status: `Writing ${allItems.length} pages to sync queue...` }));
     await batchWriteJobItems(db, firebaseUser.uid, jobId, allItems);
@@ -3138,11 +3352,17 @@ const App: React.FC = () => {
       addLog(`Syncing ${item.studentName} / ${item.pageTitle}: Fetching & parsing...`);
 
       let parsed: ParsedPageContent | null = null;
+      let contentHash: string | undefined;
+      let contentUnchanged = false;
       try {
         const content = await graph.getPageContent(item.classId, item.pageId);
-        parsed = item.parserMode === 'label-first'
-          ? parseLabeledDiaryHTML(content, item.templateVersion)
-          : await parseDiaryHTML(content, userConfig.aiModelParsing, undefined, item.templateVersion);
+        contentHash = pageContentFingerprint(content, item.parserMode, item.templateVersion);
+        contentUnchanged = isContentUnchanged({ forceReparse: item.forceReparse, record: pageSyncRecord, fingerprint: contentHash });
+        if (!contentUnchanged) {
+          parsed = item.parserMode === 'label-first'
+            ? parseLabeledDiaryHTML(content, item.templateVersion)
+            : await parseDiaryHTML(content, userConfig.aiModelParsing, undefined, item.templateVersion);
+        }
       } catch (parseError: any) {
         const errorMsg = String(parseError?.message || parseError);
 
@@ -3220,11 +3440,47 @@ const App: React.FC = () => {
         continue;
       }
 
+      if (contentUnchanged) {
+        // Same content as the last good save: the stored entries stand, so skip
+        // re-parsing and the per-entry writes. Restore the saved state that the
+        // 'syncing' marker above replaced.
+        await persistPageSyncState({
+          pageId: item.pageId,
+          classId: item.classId,
+          pageTitle: item.pageTitle,
+          studentName: item.studentName,
+          diaryGroupId: item.diaryGroupId,
+          diaryGroupName: item.diaryGroupName,
+          studentGraphId: item.studentGraphId,
+          studentUpn: item.studentUpn,
+          parserMode: item.parserMode,
+          templateVersion: item.templateVersion,
+          syncState: 'saved',
+          entryCount: knownEntryCount,
+          oneNoteLastModified: item.oneNoteLastModified,
+          lastParsedAt: pageSyncRecord?.lastParsedAt,
+          lastViewedAt: pageSyncRecord?.lastViewedAt,
+          lastError: undefined,
+          nextRetryAt: undefined,
+          contentHash,
+          lastReadAt: new Date().toISOString(),
+        });
+        await completeItem(db, firebaseUser.uid, jobId, item.itemId, 'skipped');
+        addLog(`Synced ${item.studentName} / ${item.pageTitle}: unchanged since last read.`);
+        processed++;
+        continue;
+      }
+
       if (parsed && parsed.length > 0) {
         const sectionIdentity = item.studentGraphId
           ? { graphId: item.studentGraphId, displayName: item.studentName, upn: item.studentUpn || '' }
           : null;
         const normalizedEntries = ensureUniqueEntryIds(item.pageId, collapseParsedEntries(parsed));
+        // Carry existing review work across the content rewrite. Read only for
+        // pages whose content changed (unchanged pages returned above).
+        const existingReview = reviewStateByEntryId(
+          await listStoredEntriesForPage(db, firebaseUser.uid, item.pageId)
+        );
         for (let j = 0; j < normalizedEntries.length; j++) {
           await saveEntryToFirebase(
             normalizedEntries[j],
@@ -3237,7 +3493,8 @@ const App: React.FC = () => {
             item.oneNoteLastModified,
             { parserMode: item.parserMode, templateVersion: item.templateVersion },
             sectionIdentity,
-            { id: item.diaryGroupId, name: item.diaryGroupName }
+            { id: item.diaryGroupId, name: item.diaryGroupName },
+            existingReview.get(normalizedEntries[j].id)
           );
         }
         await persistPageSyncState({
@@ -3258,6 +3515,8 @@ const App: React.FC = () => {
           lastViewedAt: pageSyncRecord?.lastViewedAt,
           lastError: undefined,
           nextRetryAt: undefined,
+          contentHash,
+          lastReadAt: new Date().toISOString(),
         });
         await completeItem(db, firebaseUser.uid, jobId, item.itemId, 'done');
         addLog(`Synced ${item.studentName} / ${item.pageTitle}: ${normalizedEntries.length} entries saved (${item.parserMode === 'label-first' ? 'label-first' : 'AI'}).`);
@@ -3329,6 +3588,7 @@ const App: React.FC = () => {
       setSyncProgress(prev => ({ ...prev, status: `Partial sync — AI pages queued until ${retryTime}. Re-sync after that time to complete.` }));
     } else {
       const completedLabel = classIds.length === 1 ? 'Class sync complete.' : `${classIds.length} classes synced.`;
+      setSavedDataVersion((version) => version + 1);
       addLog(completedLabel);
       setSyncProgress(prev => ({ ...prev, status: classIds.length === 1 ? 'Sync complete!' : `${classIds.length} classes synced.` }));
     }
@@ -3341,9 +3601,20 @@ const App: React.FC = () => {
       const statusByClass = deriveArchiveCaptureByClass(records);
       for (const classId of classIds) {
         const status = statusByClass.get(classId);
-        if (!status || status.state === 'none') continue;
+        if (!status) continue;
         const name = classes.find(c => c.id === classId)?.displayName ?? classId;
-        addLog(`Archive capture: ${name} — ${status.label}`);
+        if (status.state !== 'none') {
+          addLog(`Archive capture: ${name} — ${status.label}`);
+        }
+        if (status.sectionErrors > 0) {
+          addLog(`${name}: ${status.sectionErrors} section${status.sectionErrors === 1 ? '' : 's'} could not be listed.`);
+        }
+        if (status.deferred > 0) {
+          addLog(`${name}: ${status.deferred} page record${status.deferred === 1 ? '' : 's'} awaiting reconciliation with unavailable sections.`);
+        }
+        if (status.archived > 0) {
+          addLog(`${name}: ${status.archived} evidence-bearing page${status.archived === 1 ? '' : 's'} archived outside current OneNote discovery.`);
+        }
       }
     } catch (err) {
       console.warn('[finalizeSyncJob] archive capture summary failed:', err);
@@ -3352,6 +3623,27 @@ const App: React.FC = () => {
   };
 
   // ── Coordinator ───────────────────────────────────────────────────────────
+
+  /**
+   * Reports how a sync run ended. Counting Graph requests per syncRunId is
+   * only meaningful alongside the outcome: a run that failed early looks
+   * cheap, not broken. Best-effort — telemetry must never fail a sync.
+   */
+  const reportSyncRunOutcome = async (
+    syncRunId: string,
+    outcome: 'completed' | 'failed' | 'aborted',
+    classCount?: number
+  ): Promise<void> => {
+    try {
+      await fetch('/api/telemetry/sync-run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ syncRunId, outcome, classCount }),
+      });
+    } catch {
+      // Never surface: a telemetry failure is not a sync failure.
+    }
+  };
 
   const handleSyncClass = async (classId?: string, resumeJobId?: string, forceResync = false) => {
     const targetClassId = classId || activeClassId;
@@ -3366,6 +3658,9 @@ const App: React.FC = () => {
     setSyncingClassId(targetClassId);
     setSyncProgress({ current: 0, total: 0, status: 'Starting sync...' });
 
+    // Declared outside the try so the catch can report the run's outcome.
+    const syncRunId = createSyncRunId();
+
     try {
       if (!ensureGraphReady('class sync')) {
         setIsSyncingClass(false);
@@ -3374,7 +3669,10 @@ const App: React.FC = () => {
         return;
       }
 
-      const graph = new GraphService(accessToken || undefined, true);
+      // Logged for the operator so a canary run can be located in Cloud Logging
+      // by id rather than by guessing a time window.
+      addLog(`Sync run ${syncRunId} started.`);
+      const graph = new GraphService(accessToken || undefined, true, syncRunId);
       const { batchSize, delayMs } = getGraphBatchConfig();
       let jobId: string;
 
@@ -3392,12 +3690,16 @@ const App: React.FC = () => {
 
       const { hasRemainingWork, geminiCooldownUntil } = await processSyncJobItems(jobId, graph);
       await finalizeSyncJob(jobId, [targetClassId], hasRemainingWork, geminiCooldownUntil);
+      void reportSyncRunOutcome(syncRunId, 'completed', 1);
 
       setTimeout(() => {
         setIsSyncingClass(false);
         setSyncingClassId(null);
       }, 3000);
     } catch (e: any) {
+      // Report before branching on error type: whatever went wrong, this run's
+      // request count is partial and must not be read as a cheap success.
+      void reportSyncRunOutcome(syncRunId, 'failed', 1);
       if (e?.code === 'GRAPH_RATE_LIMIT_PAUSE' || isGraphRateLimitError(e)) {
         const nextRetryAt = e?.nextRetryAt || startGraphCooldown(e, 'class sync');
         const message = formatGraphCooldownMessage(nextRetryAt);
@@ -3444,7 +3746,12 @@ const App: React.FC = () => {
     }
 
     const selectedClassIds: string[] = Array.from(selectedNotebookIds);
-    const graph = new GraphService(accessToken || undefined, true);
+    // One id for the whole multi-class run: "requests per sync" is the number
+    // we need, and a per-class id would fragment it.
+    const syncRunId = createSyncRunId();
+    let syncRunReported = false;
+    addLog(`Sync run ${syncRunId} started for ${selectedClassIds.length} classes.`);
+    const graph = new GraphService(accessToken || undefined, true, syncRunId);
     const { batchSize, delayMs } = getGraphBatchConfig();
     const jobs: Array<{ jobId: string; classId: string; displayName: string; queued: number }> = [];
     const failedClassIds: string[] = [];
@@ -3535,7 +3842,17 @@ const App: React.FC = () => {
         status: summaryParts.length > 0 ? `Sync all complete: ${summaryParts.join(', ')}.` : 'Sync all complete.',
       }));
       addLog(`Sync all selected complete: ${summaryParts.join(', ') || 'no selected pages required processing'}.`);
+      setSavedDataVersion((version) => version + 1);
+      void reportSyncRunOutcome(
+        syncRunId,
+        failedClassIds.length > 0 ? 'failed' : 'completed',
+        completedClassIds.length
+      );
+      syncRunReported = true;
     } finally {
+      // A run that threw before the summary still needs an outcome, or its
+      // truncated request count would read as an unusually cheap success.
+      if (!syncRunReported) void reportSyncRunOutcome(syncRunId, 'aborted');
       setTimeout(() => {
         setIsSyncingClass(false);
         setSyncingClassId(null);
@@ -3679,18 +3996,8 @@ const App: React.FC = () => {
     return { total, analyzed, completion: total > 0 ? Math.round((analyzed / total) * 100) : 0 };
   }, [entries]);
 
-  const visibleClasses = useMemo(
-    () => classes.filter((cls) => showAllNotebooks || cls.accessStatus === 'accessible'),
-    [classes, showAllNotebooks]
-  );
-  const savedRosterCount = useMemo(
-    () => classes.filter((cls) => cls.rosterStatus === 'saved').length,
-    [classes]
-  );
-  const discoveredOnlyCount = useMemo(
-    () => classes.filter((cls) => cls.rosterStatus !== 'saved').length,
-    [classes]
-  );
+  // Roster ordering, filtering and the "show all" toggle live in useRosterView.
+  const roster = useRosterView(classes, selectedNotebookIds);
 
   const scrollToStudent = (id: string) => {
     const element = document.getElementById(`student-${id}`);
@@ -3698,8 +4005,12 @@ const App: React.FC = () => {
   };
 
   const isConfigured = true; // Config is now server-side
+  const canExport = accessProfile?.capabilities.canExport === true;
+  const canManageSettings = !account || accessProfile?.capabilities.canManageSettings === true;
+  const canOpenSettings = !account || accessProfile?.allowed === true;
 
   return (
+    <CollaborationAccessProvider value={collaborationAccess}>
     <div className="min-h-screen flex flex-col md:flex-row bg-slate-50 text-slate-900 overflow-hidden">
       {/* Sidebar */}
       <aside className={`${sidebarCollapsed ? 'w-16' : 'w-full md:w-80'} bg-white border-r border-slate-200 flex flex-col h-screen z-40 transition-[width] duration-200 ease-out overflow-hidden flex-shrink-0`}>
@@ -3719,10 +4030,14 @@ const App: React.FC = () => {
               <ChevronRight size={22} strokeWidth={2.5} />
             </button>
             <div className="w-8 border-t border-slate-100 my-1.5" />
-            <button onClick={() => setShowSettings(true)} className="p-2.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors" title="Settings">
-              <Settings size={20} />
-            </button>
-            <div className="w-8 border-t border-slate-100 my-1.5" />
+            {canOpenSettings && (
+              <>
+                <button onClick={() => setShowSettings(true)} className="p-2.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors" title="Settings">
+                  <Settings size={20} />
+                </button>
+                <div className="w-8 border-t border-slate-100 my-1.5" />
+              </>
+            )}
             <button
               onClick={() => { const next = syncMode === 'diary' ? 'assignments' : 'diary'; setSyncMode(next); addLog(`[Telemetry] mode_changed: ${next}`); }}
               className={`p-2.5 rounded-lg transition-colors ${syncMode === 'diary' ? 'text-indigo-600 bg-indigo-50' : 'text-slate-500 hover:text-indigo-600 hover:bg-indigo-50'}`}
@@ -3754,18 +4069,20 @@ const App: React.FC = () => {
             >
               <BarChart3 size={20} />
             </button>
-            <button
-              onClick={openExportDialog}
-              aria-disabled={!classWorkspaceToolsReady}
-              className={`p-2.5 rounded-lg transition-colors mb-1 ${
-                classWorkspaceToolsReady
-                  ? 'text-slate-500 hover:text-indigo-600 hover:bg-indigo-50'
-                  : 'text-slate-300 hover:text-amber-600 hover:bg-amber-50'
-              }`}
-              title={classWorkspaceUnavailableReason || 'Export records'}
-            >
-              <Download size={20} />
-            </button>
+            {canExport && (
+              <button
+                onClick={openExportDialog}
+                aria-disabled={!classWorkspaceToolsReady}
+                className={`p-2.5 rounded-lg transition-colors mb-1 ${
+                  classWorkspaceToolsReady
+                    ? 'text-slate-500 hover:text-indigo-600 hover:bg-indigo-50'
+                    : 'text-slate-300 hover:text-amber-600 hover:bg-amber-50'
+                }`}
+                title={classWorkspaceUnavailableReason || 'Export records'}
+              >
+                <Download size={20} />
+              </button>
+            )}
           </div>
         )}
 
@@ -3782,17 +4099,19 @@ const App: React.FC = () => {
               <div className="w-8 h-8 bg-indigo-600 rounded-xl flex items-center justify-center shadow-indigo-100 shadow-lg">
                 <BookOpen className="text-white w-4 h-4" />
               </div>
-              <h1 className="font-bold text-base tracking-tight text-slate-800">Journaler</h1>
+              <h1 className="text-left font-bold text-sm leading-tight tracking-tight text-slate-800">Notebook Feedback Studio</h1>
             </button>
             <div className="flex items-center gap-1">
-              <button
-                onClick={() => { setShowSettings(true); }}
-                className={`p-1.5 rounded-lg transition-all relative ${!isConfigured ? 'text-amber-500 bg-amber-50 animate-pulse' : 'text-slate-500 hover:bg-slate-200'}`}
-                title="Settings"
-              >
-                <Settings size={18} />
-                {!isConfigured && <div className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></div>}
-              </button>
+              {canOpenSettings && (
+                <button
+                  onClick={() => { setShowSettings(true); }}
+                  className={`p-1.5 rounded-lg transition-all relative ${!isConfigured ? 'text-amber-500 bg-amber-50 animate-pulse' : 'text-slate-500 hover:bg-slate-200'}`}
+                  title="Settings"
+                >
+                  <Settings size={18} />
+                  {!isConfigured && <div className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></div>}
+                </button>
+              )}
               <button onClick={() => setSidebarCollapsedPersisted(true)} className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors" title="Collapse sidebar">
                 <ChevronLeft size={22} strokeWidth={2.5} />
               </button>
@@ -3863,6 +4182,15 @@ const App: React.FC = () => {
               {isSyncingClass ? <RefreshCw size={12} className="animate-spin" /> : <UploadCloud size={12} />}
               Sync All Selected
             </button>
+            {!firebaseUser && selectedNotebookIds.size > 0 && (
+              // Say why the button is disabled on screen; the tooltip alone went unseen.
+              <p className="text-[11px] font-medium leading-relaxed text-slate-500">
+                Syncing saves pages to your account, so it needs your Google sign-in.{' '}
+                <button onClick={() => handleFirebaseLogin()} className="font-bold text-indigo-600 hover:text-indigo-700">
+                  Connect Google account
+                </button>
+              </p>
+            )}
           </div>
         </div>
 
@@ -3871,19 +4199,35 @@ const App: React.FC = () => {
             <div>
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 block">Active Roster</label>
               <p className="text-[10px] text-slate-400 ml-1 mt-1">
-                {savedRosterCount} saved, {discoveredOnlyCount} discovered
+                {roster.savedCount} in your roster, {roster.discoveredCount} other
                 {lastDiscoveryAt ? ` · found ${new Date(lastDiscoveryAt).toLocaleString()}` : ''}
               </p>
             </div>
-            <button 
-              onClick={() => setShowAllNotebooks(!showAllNotebooks)}
-              className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-md transition-colors ${showAllNotebooks ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-            >
-              Show All
-            </button>
+            <RosterUnavailableToggle
+              on={roster.showUnavailable}
+              count={roster.unavailableCount}
+              onToggle={roster.toggleShowUnavailable}
+            />
           </div>
-          {visibleClasses.map(cls => (
-            <div key={cls.id} className={`flex items-start gap-2.5 px-3 py-3 rounded-xl text-sm transition-all border ${
+          <p className="text-[10px] text-slate-400 ml-1 mb-2">
+            Tick a class to add it to your roster. Ticked classes are the ones loaded, synced, and used by the dashboard and export.
+          </p>
+          {classes.length > 0 && (
+            <RosterFilterInput
+              value={roster.query}
+              onChange={roster.setQuery}
+              shownCount={roster.visibleClasses.length}
+              totalCount={roster.totalCount}
+              hiddenSelectedCount={roster.hiddenSelectedCount}
+            />
+          )}
+          {roster.filtering && roster.visibleClasses.length === 0 && (
+            <RosterNoMatches query={roster.query} onClear={() => roster.setQuery('')} />
+          )}
+          {roster.visibleClasses.map((cls, index) => (
+            <React.Fragment key={cls.id}>
+            {roster.headings[index] && <RosterGroupHeading>{roster.headings[index]}</RosterGroupHeading>}
+            <div className={`flex items-start gap-2.5 px-3 py-3 rounded-xl text-sm transition-all border ${
                 selectedNotebookIds.has(cls.id)
                   ? 'bg-indigo-50 border-indigo-200 shadow-sm' 
                   : 'bg-white border-slate-100 hover:border-indigo-100'
@@ -3892,6 +4236,9 @@ const App: React.FC = () => {
                 type="checkbox" 
                 checked={selectedNotebookIds.has(cls.id)}
                 disabled={syncingPages || isSyncingClass}
+                title={selectedNotebookIds.has(cls.id)
+                  ? 'In your roster. Untick to stop loading, syncing, and including it in the dashboard and export.'
+                  : 'Add to your roster so it is loaded, synced, and included in the dashboard and export.'}
                 onChange={(e) => {
                   const next = new Set(selectedNotebookIds);
                   if (e.target.checked) next.add(cls.id);
@@ -3981,15 +4328,39 @@ const App: React.FC = () => {
                     // quiet; states needing action (rate-limited / errored pages) speak up.
                     // Prefixed "Archive capture:" so it is never read as classroom freshness.
                     const capture = archiveCaptureByClass.get(cls.id);
-                    if (!capture || capture.state === 'none') return null;
-                    const needsAction = capture.state !== 'captured';
+                    if (!capture || (
+                      capture.state === 'none' &&
+                      capture.sectionErrors === 0 &&
+                      capture.archived === 0 &&
+                      capture.deferred === 0
+                    )) return null;
+                    const needsPageAction = capture.state !== 'captured' && capture.state !== 'none';
                     return (
-                      <span
-                        className={`text-[9px] whitespace-nowrap ${needsAction ? 'font-bold text-amber-600' : 'font-medium text-slate-400'}`}
-                        title={`Archive capture: ${capture.saved} saved, ${capture.pending} pending, ${capture.errored} failed`}
+                      <div
+                        className="flex flex-col items-end gap-0.5 text-[9px] whitespace-nowrap"
+                        title={`Archive capture: ${capture.saved} saved, ${capture.pending} pending, ${capture.errored} page failures, ${capture.sectionErrors} section failures, ${capture.deferred} awaiting reconciliation, ${capture.archived} archived`}
                       >
-                        {`Archive capture: ${capture.label}`}
-                      </span>
+                        {capture.state !== 'none' && (
+                          <span className={needsPageAction ? 'font-bold text-amber-600' : 'font-medium text-slate-400'}>
+                            {`Archive capture: ${capture.label}`}
+                          </span>
+                        )}
+                        {capture.sectionErrors > 0 && (
+                          <span className="font-bold text-amber-600">
+                            {`${capture.sectionErrors} section${capture.sectionErrors === 1 ? '' : 's'} could not be listed`}
+                          </span>
+                        )}
+                        {capture.deferred > 0 && (
+                          <span className="font-medium text-amber-600">
+                            {`${capture.deferred} page record${capture.deferred === 1 ? '' : 's'} awaiting reconciliation`}
+                          </span>
+                        )}
+                        {capture.archived > 0 && (
+                          <span className="font-medium text-slate-400">
+                            {`${capture.archived} archived page${capture.archived === 1 ? '' : 's'} no longer in OneNote`}
+                          </span>
+                        )}
+                      </div>
                     );
                   })()}
                 </div>
@@ -4002,7 +4373,9 @@ const App: React.FC = () => {
                       Parser
                     </span>
                     <span className="text-[9px] text-slate-500 font-medium truncate">
-                      {cls.parserMode === 'label-first'
+                      {!isGeminiAvailable()
+                        ? 'Labels only: AI isn’t available in this version'
+                        : cls.parserMode === 'label-first'
                         ? 'Labels first, AI retry only on demand'
                         : 'AI first for flexible layouts'}
                     </span>
@@ -4013,12 +4386,15 @@ const App: React.FC = () => {
                         e.stopPropagation();
                         handleClassParserModeChange(cls.id, 'ai');
                       }}
-                      className={`px-2 py-1 rounded-md text-[9px] font-black uppercase tracking-wider transition-colors ${
-                        (cls.parserMode || DEFAULT_PARSER_MODE) === 'ai'
+                      disabled={!isGeminiAvailable()}
+                      className={`px-2 py-1 rounded-md text-[9px] font-black uppercase tracking-wider transition-colors disabled:text-slate-300 disabled:cursor-not-allowed ${
+                        cls.parserMode === 'ai'
                           ? 'bg-white text-indigo-600 shadow-sm'
                           : 'text-slate-500 hover:text-slate-700'
                       }`}
-                      title="Use Gemini parsing first for this class"
+                      title={isGeminiAvailable()
+                        ? 'Use Gemini parsing first for this class'
+                        : 'AI parsing isn’t available in this version of the app'}
                     >
                       AI
                     </button>
@@ -4040,6 +4416,7 @@ const App: React.FC = () => {
                 </div>
               </div>
             </div>
+            </React.Fragment>
           ))}
           {classes.length === 0 && !loading && (
             <div className="text-center py-16 px-6 bg-slate-50/50 rounded-3xl border border-dashed border-slate-200">
@@ -4063,7 +4440,7 @@ const App: React.FC = () => {
             <BarChart3 size={11} />
             Class Dashboard
           </button>
-          <button
+          {canExport && <button
             onClick={openExportDialog}
             aria-disabled={!classWorkspaceToolsReady}
             className={`flex items-center gap-1 px-2 py-1.5 text-[9px] font-black uppercase tracking-widest rounded-md border transition-colors ${
@@ -4075,7 +4452,7 @@ const App: React.FC = () => {
           >
             <Download size={10} />
             Export
-          </button>
+          </button>}
         </div>
         </>)}
       </aside>
@@ -4242,26 +4619,26 @@ const App: React.FC = () => {
 
                       </div>
                       <div className="space-y-4">
-                    {batchEntryOptions.length > 1 && includedBatchPreviewItems.length > 0 && (
+                    {includedBatchPreviewItems.length > 0 && (
                       <div className="bg-white border border-indigo-200 rounded-xl p-4 shadow-sm">
                         <div className="flex items-center justify-between gap-3 mb-2">
                           <div>
-                            <h3 className="text-sm font-bold text-slate-800">Outgoing Feedback Preview</h3>
+                            <h3 className="text-sm font-bold text-slate-800">Queued Feedback Review</h3>
                             <p className="text-xs text-slate-400 mt-1">
-                              This is the message set selected for delivery.
+                              Full selected feedback before delivery.
                             </p>
                           </div>
                           <span className="shrink-0 rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-indigo-600">
                             {includedBatchPreviewItems.length} {includedBatchPreviewItems.length === 1 ? 'week' : 'weeks'}
                           </span>
                         </div>
-                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-2 max-h-[300px] overflow-y-auto pr-1">
+                        <div className="space-y-3 max-h-[360px] overflow-y-auto pr-1">
                           {includedBatchPreviewItems.map((item) => (
                             <div
                               key={item.entryId}
-                              className="rounded-lg border border-slate-100 bg-slate-50/70 p-2.5"
+                              className="rounded-lg border border-slate-100 bg-slate-50/70 p-3"
                             >
-                              <div className="flex items-center gap-2 mb-1.5">
+                              <div className="flex items-center gap-2 mb-2">
                                 <h4 className="min-w-0 flex-1 truncate text-xs font-black text-slate-700">
                                   {item.label}
                                 </h4>
@@ -4271,37 +4648,20 @@ const App: React.FC = () => {
                                   </span>
                                 )}
                               </div>
-                              <div className="space-y-1 text-[11px] leading-snug text-slate-500">
-                                {item.feedback.includeDiary && item.feedback.diaryFeedback && (
-                                  <p className="line-clamp-2">
-                                    <span className="font-bold text-slate-600">Diary:</span> {item.feedback.diaryFeedback}
-                                  </p>
-                                )}
-                                {item.feedback.includePeer && item.feedback.peerFeedback && (
-                                  <p className="line-clamp-2">
-                                    <span className="font-bold text-slate-600">Peer:</span> {item.feedback.peerFeedback}
-                                  </p>
-                                )}
-                                {item.feedback.includeVocab && item.feedback.vocabFeedback && (
-                                  <p className="line-clamp-2">
-                                    <span className="font-bold text-slate-600">Vocabulary:</span> {item.feedback.vocabFeedback}
-                                  </p>
-                                )}
-                                {item.feedback.includeTranslations && item.feedback.translationsFeedback && (
-                                  <p className="line-clamp-2">
-                                    <span className="font-bold text-slate-600">Definitions:</span> {item.feedback.translationsFeedback}
-                                  </p>
-                                )}
-                                {item.feedback.includeChatbot && item.feedback.chatbotFeedback && (
-                                  <p className="line-clamp-2">
-                                    <span className="font-bold text-slate-600">Chatbot:</span> {item.feedback.chatbotFeedback}
-                                  </p>
-                                )}
-                                {item.feedback.includeOverall && item.feedback.overallFeedback && (
-                                  <p className="line-clamp-2">
-                                    <span className="font-bold text-slate-600">Overall:</span> {item.feedback.overallFeedback}
-                                  </p>
-                                )}
+                              <div className="space-y-2">
+                                {getIncludedFeedbackReviewFields(item.feedback).map((field) => (
+                                  <div
+                                    key={field.key}
+                                    className="grid gap-1 border-t border-slate-100 pt-2 first:border-t-0 first:pt-0 sm:grid-cols-[96px_minmax(0,1fr)]"
+                                  >
+                                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                      {field.label}
+                                    </p>
+                                    <p className="whitespace-pre-wrap text-xs leading-relaxed text-slate-600">
+                                      {field.value}
+                                    </p>
+                                  </div>
+                                ))}
                               </div>
                             </div>
                           ))}
@@ -4364,7 +4724,7 @@ const App: React.FC = () => {
                             onChange={(e) => setCompiledFeedback({...compiledFeedback, includePeer: e.target.checked})}
                             className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
                           />
-                          <label className="block text-sm font-bold text-slate-700">Peer Feedback</label>
+                          <label className="block text-sm font-bold text-slate-700">Feedback on Peer Comments</label>
                         </div>
                         <span className="text-xs font-medium text-slate-400">Focused Correction</span>
                       </div>
@@ -4433,7 +4793,7 @@ const App: React.FC = () => {
                             onChange={(e) => setCompiledFeedback({...compiledFeedback, includeChatbot: e.target.checked})}
                             className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
                           />
-                          <label className="block text-sm font-bold text-slate-700">Chatbot Feedback</label>
+                          <label className="block text-sm font-bold text-slate-700">Feedback on Chatbot Use</label>
                         </div>
                         <span className="text-xs font-medium text-slate-400">Focused Correction</span>
                       </div>
@@ -4527,21 +4887,37 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {showExportDialog && firebaseUser && (
+        {canExport && showExportDialog && firebaseUser && (
           <ExportDialog
             db={db}
             uid={firebaseUser.uid}
             classes={classes}
             initialClassIds={Array.from(selectedNotebookIds)}
+            accessToken={accessToken}
+            notebookTree={notebookTree}
+            parsedCache={parsedCache}
+            contentCache={contentCache}
+            pageCacheMeta={pageCacheMeta}
+            aiModelParsing={userConfig.aiModelParsing}
+            getClassParserConfig={getClassParserConfig}
+            onProgressPageParsed={(pageId, parsed, content, lastModified) => {
+              setParsedCache((prev) => ({ ...prev, [pageId]: parsed }));
+              setContentCache((prev) => ({ ...prev, [pageId]: content }));
+              setPageCacheMeta((prev) => ({
+                ...prev,
+                [pageId]: { lastModified },
+              }));
+            }}
             onClose={() => setShowExportDialog(false)}
           />
         )}
 
-        {showSettings && (
+        {canOpenSettings && showSettings && (
           <SettingsModal
             machineConfig={machineConfig}
             setMachineConfig={setMachineConfig}
             preferences={preferences}
+            preferencesLoading={preferencesLoading}
             savePref={savePref}
             config={config}
             setConfig={setConfig}
@@ -4553,7 +4929,7 @@ const App: React.FC = () => {
               firebaseProjectId: firebaseProjectInfo.projectId,
               hasGeminiKey,
             }}
-            onMicrosoftLogin={handleLogin}
+            onMicrosoftLogin={() => { void handleLogin(); }}
             onMicrosoftLogout={handleLogout}
             onFirebaseLogin={() => handleFirebaseLogin()}
             onFirebaseLogout={handleFirebaseLogout}
@@ -4570,100 +4946,7 @@ const App: React.FC = () => {
           />
         )}
 
-        {showHelp && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white w-full max-w-2xl rounded-[32px] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[80vh] animate-in zoom-in-95 duration-200">
-              <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-indigo-50/50">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-200">
-                    <HelpCircle size={24} />
-                  </div>
-                  <div>
-                    <h2 className="text-xl font-black text-slate-900 tracking-tight">Help & Documentation</h2>
-                    <p className="text-xs font-bold text-indigo-600 uppercase tracking-widest">Guide & Roadmap</p>
-                  </div>
-                </div>
-                <button onClick={() => setShowHelp(false)} className="p-2 hover:bg-white rounded-xl transition-colors text-slate-400 hover:text-slate-600 shadow-sm border border-transparent hover:border-slate-200">
-                  <X size={20} />
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-8 space-y-10">
-                {/* Symbols Guide */}
-                <section>
-                  <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <div className="w-1.5 h-4 bg-indigo-500 rounded-full" />
-                    Notebook Symbols
-                  </h3>
-                  <div className="grid gap-4">
-                    <div className="flex items-start gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                      <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center font-black text-indigo-600 shadow-sm border border-slate-100">*</div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-800">Recently Modified</h4>
-                        <p className="text-xs text-slate-500 leading-relaxed">Indicates the student has updated their diary since your last sync or view.</p>
-                      </div>
-                    </div>
-                    <div className="flex items-start gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                      <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center font-black text-indigo-600 shadow-sm border border-slate-100">1234567</div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-800">Student ID Match</h4>
-                        <p className="text-xs text-slate-500 leading-relaxed">A 7-digit ID was successfully found in the page title and extracted for sorting.</p>
-                      </div>
-                    </div>
-                    <div className="flex items-start gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                      <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center font-black text-indigo-600 shadow-sm border border-slate-100">?</div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-800">Unidentified Page</h4>
-                        <p className="text-xs text-slate-500 leading-relaxed">No 7-digit ID was found. The page might be misnamed or a non-diary entry.</p>
-                      </div>
-                    </div>
-                    <div className="flex items-start gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                      <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center text-indigo-600 shadow-sm border border-slate-100">
-                        <RefreshCw size={16} />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-800">Class Sync</h4>
-                        <p className="text-xs text-slate-500 leading-relaxed">The class sync button fetches the latest OneNote pages for that class and updates the saved Firestore records used for later review and export.</p>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-
-                {/* Roadmap */}
-                <section>
-                  <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
-                    Future Roadmap
-                  </h3>
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-3 p-3 border-b border-slate-100">
-                      <div className="w-2 h-2 bg-emerald-400 rounded-full" />
-                      <span className="text-sm font-medium text-slate-700">Background Synchronization (Phase 2)</span>
-                    </div>
-                    <div className="flex items-center gap-3 p-3 border-b border-slate-100">
-                      <div className="w-2 h-2 bg-slate-300 rounded-full" />
-                      <span className="text-sm font-medium text-slate-700">Customizable Email/Teams Templates</span>
-                    </div>
-                    <div className="flex items-center gap-3 p-3 border-b border-slate-100">
-                      <div className="w-2 h-2 bg-slate-300 rounded-full" />
-                      <span className="text-sm font-medium text-slate-700">Class-wide Performance Analytics</span>
-                    </div>
-                    <div className="flex items-center gap-3 p-3 border-b border-slate-100">
-                      <div className="w-2 h-2 bg-slate-300 rounded-full" />
-                      <span className="text-sm font-medium text-slate-700">Voice-to-Feedback Dictation</span>
-                    </div>
-                  </div>
-                </section>
-              </div>
-
-              <div className="p-6 bg-slate-50 border-t border-slate-100 flex justify-end">
-                <button onClick={() => setShowHelp(false)} className="px-6 py-2 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-800 transition-all shadow-md active:scale-95">
-                  Got it
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        <NotebookHelpModal isOpen={showHelp} onClose={() => setShowHelp(false)} />
 
         <div className={`flex-1 overflow-y-auto scroll-smooth flex flex-col ${(!syncingPages && notebookTree.length > 0) ? '' : 'p-8 lg:p-16'}`}>
           {error && (
@@ -4688,9 +4971,11 @@ const App: React.FC = () => {
                     <p className="font-black text-[10px] uppercase tracking-[0.2em] mb-2 text-red-400">Connection Blocked</p>
                     <p className="text-sm font-bold text-red-900 leading-relaxed mb-6">{error}</p>
                     <div className="flex gap-4">
-                      <button onClick={() => setShowSettings(true)} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest px-6 py-3 bg-red-600 text-white rounded-xl shadow-lg shadow-red-100 hover:bg-red-700 transition-all">
-                        <Activity size={14}/> Open Settings
-                      </button>
+                      {canManageSettings && (
+                        <button onClick={() => setShowSettings(true)} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest px-6 py-3 bg-red-600 text-white rounded-xl shadow-lg shadow-red-100 hover:bg-red-700 transition-all">
+                          <Activity size={14}/> Open Settings
+                        </button>
+                      )}
                     </div>
                   </>
                 )}
@@ -4698,7 +4983,23 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {workspaceMode === 'dashboard' && firebaseUser ? (
+          {accessStatus === 'denied' ? (
+            <div className="m-auto max-w-lg text-center py-16 px-8">
+              <div className="w-14 h-14 mx-auto mb-6 rounded-lg bg-amber-50 border border-amber-100 text-amber-600 flex items-center justify-center">
+                <ShieldAlert size={26} />
+              </div>
+              <h2 className="text-2xl font-bold text-slate-900 mb-3">No pilot class assigned</h2>
+              <p className="text-sm leading-6 text-slate-600 mb-7">
+                This Microsoft account is signed in successfully, but it is not currently a member of one of the configured pilot classes.
+              </p>
+              <button
+                onClick={handleLogout}
+                className="inline-flex items-center gap-2 px-5 py-3 rounded-lg bg-slate-900 text-white text-sm font-bold hover:bg-slate-800 transition-colors"
+              >
+                <LogOut size={16} /> Sign out
+              </button>
+            </div>
+          ) : workspaceMode === 'dashboard' && firebaseUser ? (
             <ClassDashboard
               db={db}
               uid={firebaseUser.uid}
@@ -4706,6 +5007,14 @@ const App: React.FC = () => {
               selectedClassIds={Array.from(selectedNotebookIds)}
               onClose={() => setWorkspaceMode('notebook')}
               embedded
+              dataVersion={savedDataVersion}
+              publishInternAssignments={identityBinding.status === 'bound' && identityBinding.claims?.ms_role === 'owner'}
+              sentFeedbackReview={resolveSentFeedbackReviewAccess({
+                profileRole: accessProfile ? accessProfile.role : undefined,
+                lastKnownRole: collaborationAccess.lastKnownRole,
+                identityBound: identityBinding.status === 'bound',
+              })}
+              onReconnectMicrosoft={handleLogin}
               accessToken={accessToken || undefined}
               onOpenPage={(target) => {
                 setWorkspaceMode('notebook');
@@ -4716,6 +5025,10 @@ const App: React.FC = () => {
                   target.studentName,
                   target.lastModified
                 );
+              }}
+              onRetryClassCapture={(classId) => {
+                setWorkspaceMode('notebook');
+                void handleSyncClass(classId);
               }}
             />
           ) : !syncingPages && notebookTree.length === 0 ? (
@@ -4768,7 +5081,7 @@ const App: React.FC = () => {
                           <button 
                             onClick={() => setShowHelp(true)} 
                             className="text-slate-400 hover:text-indigo-600 p-1.5 rounded-md hover:bg-indigo-50 transition-colors"
-                            title="Help & Documentation"
+                            title="Notebook guide"
                           >
                             <HelpCircle size={16}/>
                           </button>
@@ -4853,7 +5166,7 @@ const App: React.FC = () => {
                                                   section.children?.map(page => {
                                                     let sName = sg.displayName;
                                                     if (sName.includes('Collaboration Space') || sName.includes('Content Library')) {
-                                                      // Strip leading numbers and dashes (e.g. "1234567 - Hanako Yamada" -> "Hanako Yamada")
+                                                      // Strip leading numbers and dashes (e.g. "1234572 - Riko Sato" -> "Riko Sato")
                                                       sName = page.displayName.replace(/^[0-9\s-]+/, '');
                                                     }
                                                     return (
@@ -4967,7 +5280,7 @@ const App: React.FC = () => {
                             : account ? <ShieldCheck size={14}/> : <WifiOff size={14}/>}
                         </button>
                         <button
-                          onClick={firebaseUser ? handleFirebaseLogout : handleFirebaseLogin}
+                          onClick={() => void (firebaseUser ? handleFirebaseLogout() : handleFirebaseLogin())}
                           aria-label={
                             firebaseUser
                               ? `Saved records connected to ${firebaseProjectInfo.projectId}. Click to disconnect.`
@@ -5018,7 +5331,7 @@ const App: React.FC = () => {
                               {parsedPageContent ? (
                                 <>
                                   <button
-                                    onClick={handleMarkAllReady}
+                                    onClick={() => void handleMarkAllReady()}
                                     disabled={isMarkingAllReady || markAllReadySuccess}
                                     className={`px-2 py-1.5 text-xs font-bold rounded-md transition-colors flex items-center gap-1 ${markAllReadySuccess ? 'bg-emerald-500 text-white' : 'text-emerald-600 hover:bg-emerald-50'}`}
                                     title="Save entries with student diary text and mark their feedback ready"
@@ -5161,6 +5474,70 @@ const App: React.FC = () => {
                                     const workflowStatus = entryStatus[entryKey];
                                     const currentFeedback = teacherFeedback[entryKey];
                                     const savedFeedback = savedTeacherFeedback[entryKey];
+                                    const selectedFeedbackFieldKey =
+                                      activeFeedbackFieldByEntry[entryKey] || 'diaryText';
+                                    const overallDraftContext = [
+                                      entry.diaryText,
+                                      entry.vocabItems?.length ? `Vocabulary: ${entry.vocabItems.map(v => v.wordOrPhrase).join(', ')}` : null,
+                                      entry.peerFeedback?.length ? `Peer feedback: ${entry.peerFeedback.length} comment(s)` : null,
+                                      entry.translationCount ? `Translations: ${entry.translationCount}` : null,
+                                      entry.date ? `Date: ${entry.date}` : entry.weekNumber ? `Week: ${entry.weekNumber}` : null,
+                                    ].filter(Boolean).join('\n');
+                                    const feedbackFieldOptions: ContentFeedbackFieldOption[] = [
+                                      {
+                                        key: 'diaryText',
+                                        label: 'Diary',
+                                        placeholder: 'Feedback on diary text...',
+                                        value: currentFeedback?.diaryText || '',
+                                        draftValue: entry.diaryText,
+                                      },
+                                      {
+                                        key: 'peerFeedback',
+                                        label: 'Peer response',
+                                        placeholder: 'Feedback on peer comments...',
+                                        value: currentFeedback?.peerFeedback || '',
+                                        draftValue: entry.peerFeedback,
+                                      },
+                                      {
+                                        key: 'vocab',
+                                        label: 'Vocabulary',
+                                        placeholder: 'Feedback on vocabulary...',
+                                        value: currentFeedback?.vocab || '',
+                                        draftValue: entry.vocabItems,
+                                      },
+                                      {
+                                        key: 'translations',
+                                        label: 'Definitions',
+                                        placeholder: 'Feedback on definitions & examples...',
+                                        value: currentFeedback?.translations || '',
+                                        draftValue: entry.translations,
+                                      },
+                                      {
+                                        key: 'chatbot',
+                                        label: 'Chatbot',
+                                        placeholder: 'Feedback on chatbot usage...',
+                                        value: currentFeedback?.chatbot || '',
+                                        draftValue: entry.chatbotFeedback?.data || '',
+                                        draftDisabled: !entry.chatbotFeedback?.present,
+                                      },
+                                      {
+                                        key: 'overall',
+                                        label: 'General',
+                                        placeholder: 'Overall guidance, encouragement, or one student-facing summary comment...',
+                                        value: currentFeedback?.overall || '',
+                                        draftValue: overallDraftContext,
+                                      },
+                                    ];
+                                    const selectedFeedbackField =
+                                      feedbackFieldOptions.find((option) => option.key === selectedFeedbackFieldKey) ||
+                                      feedbackFieldOptions[0];
+                                    const selectFeedbackField = (fieldKey: ContentFeedbackFieldKey) => {
+                                      setActiveFeedbackFieldByEntry((prev) => ({
+                                        ...prev,
+                                        [entryKey]: fieldKey,
+                                      }));
+                                      setActiveFeedbackEntryIndex(entryIndex);
+                                    };
                                     const workflowUiState = getEntryWorkflowUiState(
                                       workflowStatus,
                                       currentFeedback,
@@ -5191,47 +5568,21 @@ const App: React.FC = () => {
                                       <div className="flex items-center justify-start xl:justify-end gap-2 flex-wrap">
                                         {/* Status badge */}
                                         <WorkflowBadge state={workflowUiState} />
-                                        {/* Warning badge - clickable, hidden once feedback is ready */}
-                                        {entry.parseWarnings && entry.parseWarnings.length > 0 && workflowUiState !== 'ready' && (
-                                          <button
-                                            onClick={() => setOpenWarningPanel(prev => prev === entryKey ? null : entryKey)}
-                                            className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded-md bg-amber-100 text-amber-700 hover:bg-amber-200 transition-colors flex items-center gap-1"
-                                            title="Click to see parse warnings"
-                                          >
-                                            <AlertTriangle size={11}/>
-                                            {entry.parseWarnings.length} {entry.parseWarnings.length === 1 ? 'warning' : 'warnings'}
-                                          </button>
-                                        )}
                                       </div>
                                     </div>
-                                    {/* Warning panel */}
-                                    {openWarningPanel === entryKey && entry.parseWarnings && entry.parseWarnings.length > 0 && (
-                                      <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
-                                        <div className="flex items-start justify-between gap-3">
-                                          <div className="flex-1">
-                                            <p className="text-xs font-bold uppercase tracking-wider text-amber-700 mb-2 flex items-center gap-1.5">
-                                              <AlertTriangle size={12}/> Parse Warnings
-                                            </p>
-                                            <ul className="space-y-1">
-                                              {entry.parseWarnings.map((w, i) => (
-                                                <li key={i} className="text-sm text-amber-900">- {w}</li>
-                                              ))}
-                                            </ul>
-                                          </div>
-                                          <button
-                                            onClick={() => { if (activePageId && selectedPageTitle && activeClassId) reopenActivePage(true); }}
-                                            disabled={!activePageId || !selectedPageTitle || !activeClassId}
-                                            className="shrink-0 px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-1 disabled:opacity-50"
-                                            title="Re-parse this page with AI"
-                                          >
-                                            <Sparkles size={12}/> Re-parse with AI
-                                          </button>
-                                        </div>
-                                      </div>
-                                    )}
+                                    <EntryWarnings
+                                      warnings={entry.parseWarnings}
+                                      ready={workflowUiState === 'ready'}
+                                      onReparse={() => reopenActivePage(true)}
+                                      canReparse={Boolean(activePageId && selectedPageTitle && activeClassId)}
+                                    />
                                     
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
-                                      <div className="md:col-span-3 bg-white rounded-xl p-4 border border-slate-200 flex flex-col gap-3">
+                                      <div className={`md:col-span-3 bg-white rounded-xl p-4 border flex flex-col gap-3 transition-colors ${
+                                        selectedFeedbackField.key === 'overall'
+                                          ? 'border-indigo-200 ring-1 ring-indigo-100'
+                                          : 'border-slate-200'
+                                      }`}>
                                         <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">Entry Details</h4>
                                         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                                           <div>
@@ -5251,35 +5602,34 @@ const App: React.FC = () => {
                                             <p className="text-sm font-semibold text-slate-700">{entry.photoCount || 0} detected</p>
                                           </div>
                                         </div>
+                                        <ContentFeedbackTargetButton
+                                          option={feedbackFieldOptions[5]}
+                                          active={selectedFeedbackField.key === 'overall'}
+                                          onSelect={() => selectFeedbackField('overall')}
+                                        />
                                       </div>
-                                      <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 flex flex-col md:col-span-2">
+                                      <div className={`bg-slate-50 rounded-xl p-4 border flex flex-col md:col-span-2 transition-colors ${
+                                        selectedFeedbackField.key === 'diaryText'
+                                          ? 'border-indigo-200 ring-1 ring-indigo-100'
+                                          : 'border-slate-200'
+                                      }`}>
                                         <div className="flex items-center justify-between mb-2">
                                           <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">Diary Text</h4>
                                         </div>
                                         <div className="max-h-80 overflow-y-auto pr-2">
                                           <p className="text-slate-800 text-sm leading-relaxed whitespace-pre-wrap">{entry.diaryText || 'No text provided.'}</p>
                                         </div>
-                                        <div className="mt-4 pt-4 border-t border-slate-200">
-                                          <div className="flex items-center justify-between mb-1">
-                                            <span className="text-[10px] font-bold text-slate-400 uppercase">Teacher Feedback</span>
-                                            <button 
-                                              onClick={() => handleDraftFeedback(entry.id || String(entryIndex), 'diaryText', entry.diaryText)}
-                                              disabled={isDrafting[`${entry.id || String(entryIndex)}-diaryText`]}
-                                              className="text-indigo-500 hover:text-indigo-700 flex items-center gap-1 text-[10px] font-bold bg-indigo-50 px-2 py-1 rounded-md transition-colors disabled:opacity-50"
-                                            >
-                                              {isDrafting[`${entry.id || String(entryIndex)}-diaryText`] ? <RefreshCw size={10} className="animate-spin"/> : <Wand2 size={10}/>}
-                                              AI Draft
-                                            </button>
-                                          </div>
-                                          <textarea 
-                                            value={currentFeedback?.diaryText || ''}
-                                            onChange={(e) => updateTeacherFeedbackField(entryKey, 'diaryText', e.target.value)}
-                                            placeholder="Teacher feedback on diary text..." 
-                                            className="w-full text-sm bg-transparent focus:outline-none focus:border-indigo-400 resize-none" rows={4}
-                                          />
-                                        </div>
+                                        <ContentFeedbackTargetButton
+                                          option={feedbackFieldOptions[0]}
+                                          active={selectedFeedbackField.key === 'diaryText'}
+                                          onSelect={() => selectFeedbackField('diaryText')}
+                                        />
                                       </div>
-                                      <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 flex flex-col">
+                                      <div className={`bg-slate-50 rounded-xl p-4 border flex flex-col transition-colors ${
+                                        selectedFeedbackField.key === 'peerFeedback'
+                                          ? 'border-indigo-200 ring-1 ring-indigo-100'
+                                          : 'border-slate-200'
+                                      }`}>
                                         <div className="flex items-center justify-between mb-2">
                                           <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">Peer Feedback</h4>
                                         </div>
@@ -5295,56 +5645,59 @@ const App: React.FC = () => {
                                         ) : (
                                           <p className="text-sm text-slate-500 italic">No peer feedback recorded.</p>
                                         )}
-                                        <div className="mt-4 pt-4 border-t border-slate-200">
-                                          <div className="flex items-center justify-between mb-1">
-                                            <span className="text-[10px] font-bold text-slate-400 uppercase">Teacher Feedback</span>
-                                            <button 
-                                              onClick={() => handleDraftFeedback(entry.id || String(entryIndex), 'peerFeedback', entry.peerFeedback)}
-                                              disabled={isDrafting[`${entry.id || String(entryIndex)}-peerFeedback`]}
-                                              className="text-indigo-500 hover:text-indigo-700 flex items-center gap-1 text-[10px] font-bold bg-indigo-50 px-2 py-1 rounded-md transition-colors disabled:opacity-50"
-                                            >
-                                              {isDrafting[`${entry.id || String(entryIndex)}-peerFeedback`] ? <RefreshCw size={10} className="animate-spin"/> : <Wand2 size={10}/>}
-                                              AI Draft
-                                            </button>
-                                          </div>
-                                          <textarea 
-                                            value={currentFeedback?.peerFeedback || ''}
-                                            onChange={(e) => updateTeacherFeedbackField(entryKey, 'peerFeedback', e.target.value)}
-                                            placeholder="Teacher feedback on peer comments..." 
-                                            className="w-full text-sm bg-transparent focus:outline-none focus:border-indigo-400 resize-none" rows={2}
-                                          />
+                                        <ContentFeedbackTargetButton
+                                          option={feedbackFieldOptions[1]}
+                                          active={selectedFeedbackField.key === 'peerFeedback'}
+                                          onSelect={() => selectFeedbackField('peerFeedback')}
+                                        />
+                                      </div>
+
+                                      <div className="md:col-span-3 bg-white rounded-xl p-4 border border-slate-200 shadow-sm">
+                                        <div className="mb-3">
+                                          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                            Feedback Entry
+                                          </p>
                                         </div>
+                                        <FeedbackFieldEditor
+                                          fields={feedbackFieldOptions}
+                                          selectedKey={selectedFeedbackField.key}
+                                          onSelectField={selectFeedbackField}
+                                          onChange={(fieldKey, text) => updateTeacherFeedbackField(entryKey, fieldKey, text)}
+                                          onFocusEntry={() => setActiveFeedbackEntryIndex(entryIndex)}
+                                          reviewEntryId={aiReview.reviewEntryId(entryKey)}
+                                          availabilityInput={aiReview.availabilityInput(savedFeedback !== undefined)}
+                                          savedRevision={savedFeedback}
+                                          ai={aiReview.ai}
+                                          buildReviewRequest={(fieldKey, text) =>
+                                            aiReview.buildRequest(entryKey, fieldKey, text)
+                                          }
+                                          onAvailabilityAction={(action) => runAiReviewAction(action, () => handleSaveDraft(entry, entryIndex))}
+                                        />
                                       </div>
 
                                       {/* Row 3 */}
-                                      <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 flex flex-col">
+                                      <div className={`bg-slate-50 rounded-xl p-4 border flex flex-col transition-colors ${
+                                        selectedFeedbackField.key === 'vocab'
+                                          ? 'border-indigo-200 ring-1 ring-indigo-100'
+                                          : 'border-slate-200'
+                                      }`}>
                                         <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider mb-2">Vocabulary ({entry.vocabCount})</h4>
                                         <ul className="list-disc list-inside text-sm text-slate-700 space-y-1 max-h-48 overflow-y-auto pr-1">
                                           {(entry.vocabItems || []).map((v, i) => (
                                             <li key={i}>{v.wordOrPhrase}</li>
                                           ))}
                                         </ul>
-                                        <div className="mt-4 pt-4 border-t border-slate-200">
-                                          <div className="flex items-center justify-between mb-1">
-                                            <span className="text-[10px] font-bold text-slate-400 uppercase">Teacher Feedback</span>
-                                            <button
-                                              onClick={() => handleDraftFeedback(entry.id || String(entryIndex), 'vocab', entry.vocabItems)}
-                                              disabled={isDrafting[`${entry.id || String(entryIndex)}-vocab`]}
-                                              className="text-indigo-500 hover:text-indigo-700 flex items-center gap-1 text-[10px] font-bold bg-indigo-50 px-2 py-1 rounded-md transition-colors disabled:opacity-50"
-                                            >
-                                              {isDrafting[`${entry.id || String(entryIndex)}-vocab`] ? <RefreshCw size={10} className="animate-spin"/> : <Wand2 size={10}/>}
-                                              AI Draft
-                                            </button>
-                                          </div>
-                                          <textarea
-                                            value={currentFeedback?.vocab || ''}
-                                            onChange={(e) => updateTeacherFeedbackField(entryKey, 'vocab', e.target.value)}
-                                            placeholder="Teacher feedback on vocabulary..."
-                                            className="w-full text-sm bg-transparent focus:outline-none focus:border-indigo-400 resize-none" rows={2}
-                                          />
-                                        </div>
+                                        <ContentFeedbackTargetButton
+                                          option={feedbackFieldOptions[2]}
+                                          active={selectedFeedbackField.key === 'vocab'}
+                                          onSelect={() => selectFeedbackField('vocab')}
+                                        />
                                       </div>
-                                      <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 flex flex-col">
+                                      <div className={`bg-slate-50 rounded-xl p-4 border flex flex-col transition-colors ${
+                                        selectedFeedbackField.key === 'translations'
+                                          ? 'border-indigo-200 ring-1 ring-indigo-100'
+                                          : 'border-slate-200'
+                                      }`}>
                                         <div className="flex items-center justify-between mb-2">
                                           <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">Definitions & Examples ({entry.translationCount})</h4>
                                         </div>
@@ -5357,27 +5710,17 @@ const App: React.FC = () => {
                                             </div>
                                           ))}
                                         </div>
-                                        <div className="mt-4 pt-4 border-t border-slate-200">
-                                          <div className="flex items-center justify-between mb-1">
-                                            <span className="text-[10px] font-bold text-slate-400 uppercase">Teacher Feedback</span>
-                                            <button 
-                                              onClick={() => handleDraftFeedback(entry.id || String(entryIndex), 'translations', entry.translations)}
-                                              disabled={isDrafting[`${entry.id || String(entryIndex)}-translations`]}
-                                              className="text-indigo-500 hover:text-indigo-700 flex items-center gap-1 text-[10px] font-bold bg-indigo-50 px-2 py-1 rounded-md transition-colors disabled:opacity-50"
-                                            >
-                                              {isDrafting[`${entry.id || String(entryIndex)}-translations`] ? <RefreshCw size={10} className="animate-spin"/> : <Wand2 size={10}/>}
-                                              AI Draft
-                                            </button>
-                                          </div>
-                                          <textarea 
-                                            value={currentFeedback?.translations || ''}
-                                            onChange={(e) => updateTeacherFeedbackField(entryKey, 'translations', e.target.value)}
-                                            placeholder="Teacher feedback on definitions & examples..."
-                                            className="w-full text-sm bg-transparent focus:outline-none focus:border-indigo-400 resize-none" rows={2}
-                                          />
-                                        </div>
+                                        <ContentFeedbackTargetButton
+                                          option={feedbackFieldOptions[3]}
+                                          active={selectedFeedbackField.key === 'translations'}
+                                          onSelect={() => selectFeedbackField('translations')}
+                                        />
                                       </div>
-                                      <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 flex flex-col">
+                                      <div className={`bg-slate-50 rounded-xl p-4 border flex flex-col transition-colors ${
+                                        selectedFeedbackField.key === 'chatbot'
+                                          ? 'border-indigo-200 ring-1 ring-indigo-100'
+                                          : 'border-slate-200'
+                                      }`}>
                                         <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider mb-2">Chatbot Feedback</h4>
                                         <div className="flex items-center gap-2 mb-2">
                                           <span className={`px-2 py-1 rounded-md text-xs font-bold ${entry.chatbotFeedback?.present ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}>
@@ -5387,43 +5730,10 @@ const App: React.FC = () => {
                                         {entry.chatbotFeedback?.present && (
                                           <p className="text-sm text-slate-700 bg-white p-3 rounded-lg border border-slate-100 shadow-sm max-h-80 overflow-y-auto">{entry.chatbotFeedback.data}</p>
                                         )}
-                                        <textarea
-                                          value={currentFeedback?.chatbot || ''}
-                                          onChange={(e) => updateTeacherFeedbackField(entryKey, 'chatbot', e.target.value)}
-                                          placeholder="Teacher feedback on chatbot usage..."
-                                          className="mt-4 pt-4 w-full text-sm bg-transparent border-t border-slate-200 focus:outline-none focus:border-indigo-400 resize-none" rows={2}
-                                        />
-                                      </div>
-                                      <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 flex flex-col md:col-span-3">
-                                        <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider mb-2">General Feedback</h4>
-                                        <p className="text-xs text-slate-500 mb-3">
-                                          Use this for overall guidance, encouragement, or metadata corrections that should be expressed as one student-facing comment.
-                                        </p>
-                                        <div className="flex items-center justify-between mb-1">
-                                          <span className="text-[10px] font-bold text-slate-400 uppercase">Teacher Feedback</span>
-                                          <button
-                                            onClick={() => {
-                                              const ctx = [
-                                                entry.diaryText,
-                                                entry.vocabItems?.length ? `Vocabulary: ${entry.vocabItems.map(v => v.wordOrPhrase).join(', ')}` : null,
-                                                entry.peerFeedback?.length ? `Peer feedback: ${entry.peerFeedback.length} comment(s)` : null,
-                                                entry.translationCount ? `Translations: ${entry.translationCount}` : null,
-                                                entry.date ? `Date: ${entry.date}` : entry.weekNumber ? `Week: ${entry.weekNumber}` : null,
-                                              ].filter(Boolean).join('\n');
-                                              handleDraftFeedback(entry.id || String(entryIndex), 'overall', ctx);
-                                            }}
-                                            disabled={isDrafting[`${entry.id || String(entryIndex)}-overall`]}
-                                            className="text-indigo-500 hover:text-indigo-700 flex items-center gap-1 text-[10px] font-bold bg-indigo-50 px-2 py-1 rounded-md transition-colors disabled:opacity-50"
-                                          >
-                                            {isDrafting[`${entry.id || String(entryIndex)}-overall`] ? <RefreshCw size={10} className="animate-spin"/> : <Wand2 size={10}/>}
-                                            AI Draft
-                                          </button>
-                                        </div>
-                                        <textarea
-                                          value={currentFeedback?.overall || ''}
-                                          onChange={(e) => updateTeacherFeedbackField(entryKey, 'overall', e.target.value)}
-                                          placeholder="General feedback for this entry..."
-                                          className="w-full text-sm bg-transparent border-t border-slate-200 pt-4 focus:outline-none focus:border-indigo-400 resize-none" rows={3}
+                                        <ContentFeedbackTargetButton
+                                          option={feedbackFieldOptions[4]}
+                                          active={selectedFeedbackField.key === 'chatbot'}
+                                          onSelect={() => selectFeedbackField('chatbot')}
                                         />
                                       </div>
                                     </div>
@@ -5648,6 +5958,8 @@ const App: React.FC = () => {
                           syncingClassName={syncingClassId ? (classes.find(c => c.id === syncingClassId)?.displayName ?? null) : null}
                           hasAnySyncedClass={classes.some(c => selectedNotebookIds.has(c.id) && c.lastSynced)}
                           selectedNotebookCount={selectedNotebookIds.size}
+                          googleConnected={Boolean(firebaseUser)}
+                          onConnectGoogle={() => handleFirebaseLogin()}
                         />
                       )}
                     </div>
@@ -5678,6 +5990,7 @@ const App: React.FC = () => {
         </div>
       </main>
     </div>
+    </CollaborationAccessProvider>
   );
 };
 

@@ -16,8 +16,8 @@ Class Notebook
 ├── Collaboration Space     (shared read/write for all)
 └── Diary Group 1           (section group — contains multiple students)
     └── [Section]
-        ├── Page: "1234570 - 山田花子"   ← student identity is here
-        ├── Page: "1234567 - 鈴木一郎"
+        ├── Page: "1234570 - 山田陽菜"   ← student identity is here
+        ├── Page: "1234572 - 佐藤梨子"
         └── ...
 └── Diary Group 2
     └── ...
@@ -33,9 +33,9 @@ This institution stores students in Microsoft Entra/Graph with ID-based display 
 
 | Field | Format | Example |
 |---|---|---|
-| `displayName` | `ak{7-digit-id}` | `ak1234567` |
-| `userPrincipalName` | `ak{7-digit-id}@school.edu` | `ak1234567@school.edu` |
-| `mail` | same as UPN | `ak1234567@school.edu` |
+| `displayName` | `ak{7-digit-id}` | `ak1234570` |
+| `userPrincipalName` | `ak{7-digit-id}@school.edu` | `ak1234570@school.edu` |
+| `mail` | same as UPN | `ak1234570@school.edu` |
 
 Students' real names (Japanese) are **not stored in Graph**. Name-based matching strategies reliably fail for this tenant.
 
@@ -47,9 +47,9 @@ Students' real names (Japanese) are **not stored in Graph**. Name-based matching
 
 1. `extractStudentNumber(pageTitle)` pulls the 7-digit ID from the page title using `(?<!\d)\d{7}(?!\d)`.
 2. If the Firestore roster cache is warm, `matchStudentIdentityFromRoster` finds the roster entry whose `studentNumber` or UPN contains that ID — instant, no API call.
-3. If the cache is cold, `graph.resolveStudentIdentity` fetches all class members and runs **Strategy A**: find any member whose UPN contains the extracted ID string. Since `ak1234567@school.edu` contains `1234570`, this matches reliably.
+3. If the cache is cold, `graph.resolveStudentIdentity` fetches all class members and runs **Strategy A**: find any member whose UPN contains the extracted ID string. Since `ak1234570@school.edu` contains `1234570`, this matches reliably.
 
-**The fix applied 2026-05-11**: The feedback modal (`handleReviewAndSend`) was passing only `activeStudentName` (the section group display name, e.g., the Japanese name "山田花子") to `findStudentEmail`. Since the Japanese name does not appear anywhere in Graph, all strategies failed. Fixed by passing `[selectedPageTitle, activeStudentName].join(' ')` instead, so `extractStudentNumber` can pull the ID from the page title. This mirrors the entry-save path at App.tsx line 2530 which already worked correctly.
+**The fix applied 2026-05-11**: The feedback modal (`handleReviewAndSend`) was passing only `activeStudentName` (the section group display name, e.g., the Japanese name "山田陽菜") to `findStudentEmail`. Since the Japanese name does not appear anywhere in Graph, all strategies failed. Fixed by passing `[selectedPageTitle, activeStudentName].join(' ')` instead, so `extractStudentNumber` can pull the ID from the page title. This mirrors the entry-save path at App.tsx line 2530 which already worked correctly.
 
 **Known limitations:**
 - Pages where the student ID has the wrong digit count (e.g., 8 digits due to typo): `extractStudentNumber` returns null, all strategies fail. Require manual OneNote correction by student. No reliable programmatic recovery.
@@ -77,9 +77,9 @@ This is the universal enabler for non-journal content types. It removes the depe
 ### Page-level (`<meta name="author">`)
 The HTML returned by `/onenote/pages/{id}/content` includes:
 ```html
-<meta name="author" content="ak1234567" />
+<meta name="author" content="ak1234570" />
 ```
-This is the **display name** of the page creator — not a UPN or Graph user ID. In this tenant, the display name is `ak1234567`, which is matchable against the pre-loaded roster. Useful for Collaboration Space pages where the page creator is the student.
+This is the **display name** of the page creator — not a UPN or Graph user ID. In this tenant, the display name is `ak1234570`, which is matchable against the pre-loaded roster. Useful for Collaboration Space pages where the page creator is the student.
 
 **Limitation**: page-level only. If multiple students contribute to one page, only the original creator is captured here.
 
@@ -109,7 +109,7 @@ Assignment file submissions are stored in the student's OneDrive/SharePoint fold
 
 ### Future: Collaboration Space pages
 **Resolution**: use `<meta name="author">` from page HTML (display name) + pre-loaded roster match.
-**Reliability**: high for the standard workflow — each student creates their own page (copied from the teacher's template). OneNote sets `<meta name="author">` automatically to the page creator's display name; the student cannot avoid it and no naming convention is required. In this tenant the value will be `ak1234567`, directly matchable against the pre-loaded roster. We already fetch the page HTML for content parsing, so this adds no extra API call.
+**Reliability**: high for the standard workflow — each student creates their own page (copied from the teacher's template). OneNote sets `<meta name="author">` automatically to the page creator's display name; the student cannot avoid it and no naming convention is required. In this tenant the value will be `ak1234570`, directly matchable against the pre-loaded roster. We already fetch the page HTML for content parsing, so this adds no extra API call.
 
 The only case this does not cover is multiple students collaborating on a single shared page — but that is not the intended workflow and the Class Notebook access model discourages it.
 
@@ -121,9 +121,9 @@ The only case this does not cover is multiple students collaborating on a single
 
 **If building a new OneNote-based application** (not the existing diary notebook):
 
-1. **Put the student ID at the container level, not the content level.** Name each student's section `1234570 - 山田花子` rather than relying on students to write their ID on each page. All pages within that section inherit the attribution from the container. The section name is set once at notebook creation and is durable.
+1. **Put the student ID at the container level, not the content level.** Name each student's section `1234570 - 山田陽菜` rather than relying on students to write their ID on each page. All pages within that section inherit the attribution from the container. The section name is set once at notebook creation and is durable.
 
-2. **A section group named with the ID+name pattern is matchable against the roster.** `extractStudentNumber("1234570 - 山田花子")` extracts `1234570`, which is found in `ak1234567@school.edu`. This gives you UPN resolution from the tree structure alone, without page-level parsing.
+2. **A section group named with the ID+name pattern is matchable against the roster.** `extractStudentNumber("1234570 - 山田陽菜")` extracts `1234570`, which is found in `ak1234570@school.edu`. This gives you UPN resolution from the tree structure alone, without page-level parsing.
 
 3. **The current diary notebook cannot be retrofitted to this structure.** Diary Groups (not per-student sections) were established when the notebook was created. Changing to per-student sections would require restructuring the notebook itself.
 

@@ -34,6 +34,9 @@ docs/reference/Dashboard/
 *.sln
 *.sw?
 
+# Cloud Run deployment config (identifying values, not secrets)
+deploy/cloud-run.env
+
 # Never publish real classroom data or local AI chat logs
 *.csv
 *.xlsx

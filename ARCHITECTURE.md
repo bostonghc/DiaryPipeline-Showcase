@@ -1,6 +1,6 @@
 # Architecture & Design Decisions
 
-This document tracks significant architectural decisions, constraints, and design philosophies for the OneNote Class Notebook Journal Exporter.
+This document tracks significant architectural decisions, constraints, and design philosophies for DiaryPipeline and its app, Notebook Feedback Studio (see §51).
 
 ## 1. Read-Only Student Submissions (No HTML Editing)
 
@@ -55,6 +55,8 @@ The ultimate solution for speed is scheduled batch processing. We will build a "
   - *Peer Feedback:* Evaluating the *quality and quantity* of feedback a student gives or receives is crucial for their development. AI can assess if peer comments are superficial or deeply helpful.
 - **Exclusions:** It adds little value to factual fields like "Date" or "Weather". By restricting AI generation to specific fields, we reduce token costs, improve generation speed, and keep the UI uncluttered.
 
+**Update (2026-11-18):** The "drafting assistant" model above (AI writes suggested feedback, the teacher edits it) was replaced by AI Feedback Review (§53). The AI no longer writes student-facing feedback; it reviews the instructor's or intern's own draft. The text above is kept as history.
+
 ## 5. Customizable AI Evaluation Prompts
 
 **Date:** March 2026
@@ -63,7 +65,8 @@ The ultimate solution for speed is scheduled batch processing. We will build a "
 **Reasoning:**
 - Different teachers, or even the same teacher across different terms, may have different pedagogical goals. One term might focus strictly on grammar correction, while another might focus on emotional tone and encouragement.
 - Hardcoding the AI prompts removes agency from the educator.
-- **Implementation:** We provide an "AI Evaluation Prompts" section within the global Settings modal. These prompts are saved to `localStorage` and injected into the Gemini API calls when the "AI Draft" button is clicked.
+- **Implementation (updated 2026-11-17):** Settings → Prompts stores personal drafting instructions in `users/{uid}/preferences/global`, with one-time migration from the earlier `localStorage` values. They are injected when AI Draft runs. Allowed pilot authors, including interns and the lead, can edit their own prompts; owner setup is separate (§40).
+- **Update (2026-11-18):** AI Draft was removed (§53), so these drafting prompts are no longer sent to any AI call. They remain stored (`aiPrompts`, retired) and are shown read-only in Settings → Prompts as "Your earlier drafting instructions (no longer used)", with a "Copy into review focus" button. The reviewer uses a new `reviewFocus` preference, versioned with `reviewFocusVersion: 1`, whose defaults are `DEFAULT_FIELD_REVIEW_FOCUS`.
 
 ## 6. Database Design & Entry Identity (Bridge Model: Global Semantic IDs)
 
@@ -109,6 +112,14 @@ The ultimate solution for speed is scheduled batch processing. We will build a "
 - **Redirect URI Strategy:** `APP_URL` is the canonical base URL for constructing `/auth/callback`. The currently approved development callback is `http://localhost:3000/auth/callback` for local work.
 - **Registration Lifecycle:** While the app remains pre-production, a single Entra app registration may carry multiple exact development redirect URIs. Before production deployment, create a separate production Entra app registration so production secrets and redirect URIs are isolated from ongoing development.
 
+**Proxy Transport Correction (August 2026):** The Graph SDK does not support the
+`fetchOptions.customFetch` hook that the earlier client wrapper assumed it did.
+Once browser token storage was removed, that dead hook allowed the SDK's non-secret
+placeholder value to reach Microsoft Graph directly, producing `IDX14100`. Proxy
+mode now sets the SDK base URL explicitly to the same-origin `/api/graph` route and
+uses the browser value only as a connected-session marker. A regression test
+asserts that SDK requests never target `graph.microsoft.com` in proxy mode.
+
 ## 11. Security & Data Isolation vs. Shared Access
 
 **Date:** March 2026
@@ -137,6 +148,46 @@ This section intentionally follows the principle of *security by architecture* r
 4. **Authentication converts to structure once:** Firebase Auth is load-bearing only at the moment of UID derivation. After that, the UID becomes a structural path component — authentication is not re-checked on every read or write.
 
 **Future Constraint:** If a "Notebook Access" mapping collection is added to support collaboration, it must follow the same structural discipline. Granting access by writing a permission record into the mapping collection (architecture) is acceptable; validating access at runtime by calling the Graph API on each Firestore read (authentication dependency) is not.
+
+**Collaboration Pilot Update (August 2026):** Collaboration is now an active
+product priority for a six-person intern cohort. The first foundation keeps the
+existing Firestore paths unchanged while adding a server-owned access profile:
+
+- `owner` and `lead` UPNs are explicit deployment configuration; the owner keeps
+  full notebook scope while the lead receives all configured pilot classes;
+- an `intern` receives only the configured pilot classes that also appear in the
+  signed-in user's direct Microsoft 365 group memberships;
+- unassigned tenant accounts are denied when pilot mode is enabled;
+- the resolved profile and class intersection are cached in the server session
+  for five minutes, converting the Graph membership check into a temporary local
+  authorization structure instead of repeating it for every request;
+- the profile carries an explicit `all` or `classes` scope, its resolution source,
+  and `resolvedAt`; this removes the former ambiguity where an empty class array
+  could mean either all classes or no classes;
+- upstream Graph 403 responses invalidate the cached decision and permit one
+  forced membership refresh, with a 15-second session floor to prevent denial
+  loops from repeatedly paging Microsoft memberships;
+- Graph tokens remain exclusively in the server session. The OAuth callback now
+  sends the browser only a success signal, and `/api/auth/me` returns account and
+  access-profile data without returning an access token.
+
+This access profile is the authorization input for the hosted UI and the future
+shared workspace; it is not itself the shared Firestore data model. The pilot uses
+a trusted-cohort model: interns are screened program members, so assigned-class
+visibility is the send boundary and recipients are not separately allowlisted.
+The intern UI keeps class-scoped loading, review, sync, composition, and direct
+sending. Personal Feedback and Prompts settings are available to every allowed
+pilot author (2026-11-17); runtime, model, workflow setup, Export, and access
+administration remain absent for interns. The lead also has personal settings.
+`canManageSettings` continues to mean owner setup, not personal preferences. These
+capabilities are presentation policy; the server-enforced security boundary is
+class-scoped Graph access. Local class and selection caches are keyed by the
+tenant-local Microsoft object ID and filtered before state restoration, preventing
+stale or cross-account selections from initiating work. Personal `/me/onenote/*`
+routes are unsupported for interns because personal notebook IDs cannot be safely
+derived from group membership. Before launch, the app still needs a
+Microsoft-to-Firebase identity/workspace bridge. Teacher feedback remains distinct through authorship
+and provenance, not through a blanket intern send prohibition.
 
 ## 12. Development Processes for Legibility & Intelligibility
 
@@ -239,7 +290,7 @@ This refinement maintains the small payload size required to avoid XHR errors wh
 **Reasoning:**
 1. **Student Data Isolation:** By default, all data is siloed under the teacher's UID (`/users/{uid}/...`). This ensures that teachers can only see the students and notebooks they have explicitly synced.
 2. **Admin Privileges:** Certain operations (e.g., viewing global analytics, managing system prompts, or troubleshooting other users' data) require admin privileges.
-3. **Bootstrapping:** To prevent a "chicken-and-egg" problem where no one can become an admin, we hardcoded the developer's email (`ghcarr@gmail.com`) as the initial admin in the security rules. This admin can then grant admin roles to others by writing to their user document in Firestore.
+3. **Bootstrapping:** To prevent a "chicken-and-egg" problem where no one can become an admin, the security rules recognise the developer's verified email as the initial admin. The public Showcase exporter replaces that operator identity with a non-deliverable placeholder; self-hosters must configure their own bootstrap identity. This admin can then grant admin roles to others by writing to their user document in Firestore.
 4. **Verification:** The `isAdmin` check verifies both the email and that the email is verified (`email_verified == true`) in the Firebase Auth token.
 
 **Implementation:**
@@ -263,11 +314,11 @@ This refinement maintains the small payload size required to avoid XHR errors wh
 
 **Migration:** On June 5, 2026, the canonical local path moved from the OneDrive-hosted checkout to:
 
-`~/dev/DiaryPipeline`
+`~/dev/DiaryPipelineProject_github`
 
 The deprecated OneDrive checkout was:
 
-`<file-sync folder>/DiaryPipeline`
+`~/Library/CloudStorage/OneDrive-<university>/DiaryPipelineProject_github`
 
 **Reasoning:**
 1. **Git Metadata Requires Single-Writer Local Ownership:** OneDrive repeatedly synced `.git/index`, lock files, and executable-bit metadata between machines. That created stale staged changes, lock-file interruptions, and false dirty states. Git's index is not designed for file-sync replication.
@@ -300,6 +351,7 @@ The deprecated OneDrive checkout was:
 - Error states should prefer actionable explanations over terse failure codes.
 - Debug information may be prominent in development, but it should still respect layout hierarchy and convert to drawers, bottom sheets, or collapsible sections on smaller widths.
 - State-aware guidance should present one primary next action at a time. The guidance may be explicit, but it should remain operational and context-bound rather than tutorial-like.
+- **Unavailable is not hidden** (added 2026-10-13). Hide a control or tab only when it is never available to that person, such as the owner/lead-only Sent Feedback Review tab for an intern. When it is unavailable for a reason the person can fix (an expired Microsoft or Google sign-in, a missing prerequisite), keep it visible and greyed and state the reason and the action together: as the tooltip, and in the pane it opens, with the action as a button. Use `aria-disabled` and a `title` rather than the `disabled` attribute, so the control stays focusable and the explanation is reachable by keyboard and touch, where hover text is not. Never silently move the person to another view: an unexplained change is more confusing than a greyed control. A control that is gone altogether (for example after an explicit sign-out) may return the person to the default view. First applied to the dashboard's Sent Feedback Review tab (`components/dashboard/dashboardTabs.ts`, `services/sentFeedbackAccess.ts`); apply it to other places as they are touched rather than in a sweep.
 - Compact status icons must advertise both state and click behavior through hover text and accessible labels. In app chrome, Microsoft and saved-records controls own connection/disconnection actions; they should not double as navigation controls.
 
 ## 23. Firestore Connection Strategy: Long Polling
@@ -426,6 +478,7 @@ These should travel with saved page metadata, saved entries, and exports so grou
 - **Explicit Cooldown Handling:** Gemini `429` responses should pause the AI lane for the provider-specified retry window and then continue cleanly.
 - **Simple Sync States for Teachers:** UI language should stay simple: `queued`, `syncing`, `saved`, `waiting on rate limit`, `needs retry`.
 - **Unresolved Contributor Labels:** If bracketed human-feedback names cannot be attributed confidently, store them as `Unspecified 1`, `Unspecified 2`, etc. This preserves feedback blocks and export usefulness without pretending we know the contributor identity.
+- **Label forms students actually use (parser revision 2, 2026-10-06):** besides `[Name]`, a comment label may be `{Name}`, `<Name>`, `〔Name〕`, `(Name)` at the start of a line, or a name alone on its own line when the cell alternates name and comment. A comment runs across lines until the next label; a label with no comment is not a comment. Before this, every unrecognised line became its own `Unspecified` comment: on the 2026 classes that over-counted comments by ~1,400 (5,492 → 4,075) and hid names on ~2,200 of them. Names run into the first sentence (`Towa I like…`) still read as unlabelled — telling them from ordinary sentences needs the class's names, which the parser does not have (see `services/parserService.ts#parseFeedbackCell`).
 - **Feedback Reminder:** Outgoing email/Teams feedback should remind students, in English and Japanese, that the feedback reflects the reviewed page state up to that point and that earlier entries should not be revised after feedback has been issued.
 - **Entry Save Labels:** Entry actions should reflect workflow truthfully. `Save Draft` preserves work without making it send-ready. `Save & Mark Ready` stores the current feedback and writes the `approved` wire status, presented to teachers as **Feedback Ready**. `Review & Send` is the final delivery leg and writes a separate `feedbackHistory` record when email/Teams delivery succeeds.
 - **Bulk Readiness Gate:** `Mark All Ready` must not promote every parsed row blindly. It uses a deterministic diary-text threshold (currently 30 normalized characters in `diaryText`) and skips empty or metadata-only entries without AI calls.
@@ -446,7 +499,7 @@ This is not a parser bug. The labeled-diary-v1 parser is correct: given the live
 
 **Operational workaround (shipped 2026-05-29):** A green `⟳` Force re-parse button in the document toolbar bypasses all four caching layers — in-memory `parsedCache`/`contentCache`, Firestore stored entries, and `pageSyncRecord` freshness check — fetches fresh Graph HTML, and logs: Graph HTML length, raw parsed count, post-collapse count, and saved count. Use this when a page shows fewer entries than expected and the page modification date has not changed.
 
-**Root cause of the original mismatch:** The page was first opened or synced when the Firestore snapshot contained only 1 entry (likely from a previous partial parse). Subsequent opens served that snapshot because the freshness check passed. The parser itself was never the problem — the fix was to bypass the cache, not to change the parser. The fixture test (`services/__fixtures__/<real-page fixture, not included>`) proves the parser returns 30 entries from the real Graph HTML under DOM conditions identical to the app.
+**Root cause of the original mismatch:** The page was first opened or synced when the Firestore snapshot contained only 1 entry (likely from a previous partial parse). Subsequent opens served that snapshot because the freshness check passed. The parser itself was never the problem — the fix was to bypass the cache, not to change the parser. The fixture test (`services/__fixtures__/9876543-geoff-carr-30-entries.htm`) proves the parser returns 30 entries from the real Graph HTML under DOM conditions identical to the app.
 
 ## 29. Firestore Review Model: Page Docs, Immutable Snapshots, and Snapshot-Scoped Entries
 
@@ -679,7 +732,7 @@ This is the **sole source of Tailwind styles** in the dev server. There is no Po
 - **Open Feedback Context:** collapse the Notebook Structure pane and the left app sidebar to preserve space for the diary and feedback context.
 - **Restore Notebook Structure:** use the content-header menu button when the tree is hidden. The icon-rail chevron remains reserved for expanding the left app sidebar.
 - **Collapsed left sidebar:** keep a narrow icon rail rather than fully hiding app chrome so Settings, mode, discovery, sync, and export remain reachable.
-- **Workspace Overview:** the Journaler BookOpen app identity is the app-shell orientation affordance. It closes Feedback Context, restores the left sidebar and notebook tree, clears the active page view, and respects the unsaved-feedback confirmation before leaving current work. It does not disconnect accounts or clear synced notebook data.
+- **Workspace Overview:** the BookOpen app identity is the app-shell orientation affordance. It closes Feedback Context, restores the left sidebar and notebook tree, clears the active page view, and respects the unsaved-feedback confirmation before leaving current work. It does not disconnect accounts or clear synced notebook data.
 - **Connection Icons:** Microsoft and saved-records icons in the content header are status/action controls only. They connect or disconnect their own service and use tooltips/ARIA labels to make that explicit.
 
 **Reasoning:** The app has three different navigation surfaces: global app chrome, notebook/tree navigation, and the feedback context pane. Treating them as distinct surfaces avoids overloading one chevron or menu pattern for every action. The test is workflow clarity: after a teacher clicks an action, the pane that explains the result should become visible unless that would disrupt an active review surface.
@@ -733,8 +786,29 @@ For each supported template, the contract should eventually define:
 **Date:** June 1, 2026
 **Decision:** The Settings surface may show connection state and runtime configuration status, but it is not a browser secret manager.
 
+**Personal preferences (updated 2026-11-20):** all allowed pilot authors can open Settings
+in both expanded and collapsed sidebar layouts. Feedback tone, display name,
+default closing, and per-field review focus are personal preferences under
+the existing `users/{uid}/preferences/global` path. The Feedback tab is separate
+from owner-only runtime, model, and workflow setup; leads and interns do not
+fetch runtime status or write model settings through this UI. Greetings and
+closings remain editable per message in Review & Send. Tone guides the AI reviewer
+of the person's own draft (§53), and the tab explains when AI is unavailable.
+Preference edits survive unrelated App renders, and new defaults become active
+only after a successful save; a rejected write leaves the previous saved defaults
+in use.
+
+Preference loads, saves and legacy migration are scoped to the Firebase uid and
+database, with an epoch that distinguishes switching away and back to the same
+account. Older completions cannot publish into the current account. Migration
+runs only after a successful read; loading stays active until migration settles.
+A failed read blocks saves and migration. Failed migration writes keep the loaded
+values and legacy storage; successful migration publishes its values and removes
+the earlier local prompt key only while the originating scope is still current.
+
 **Implementation direction:**
 - Server-side secrets such as `ENTRA_CLIENT_SECRET`, `SESSION_SECRET`, and `GEMINI_API_KEY` remain in `.env.local`, deployment environment variables, OS keychain, or a future installer/admin setup path.
+- **Browser/server key split (2026-11-18):** `GEMINI_API_KEY` is server-only. `vite.config.ts` no longer injects it (or `API_KEY`) into the browser bundle; it injects only `BROWSER_GEMINI_API_KEY`, which feeds the remaining browser AI features (parsing fallback, analysis) in local development. Those features stay unavailable on hosted builds. A test builds with a sentinel `GEMINI_API_KEY` and fails if the sentinel appears anywhere in `dist/`. Settings shows `GEMINI_API_KEY` as the server key used for AI feedback review (§53).
 - The browser may request `/api/config/status`, which returns booleans and safe labels only. It must never return secret values.
 - Settings can show configured/missing state, purpose, setup location, and whether a restart is required.
 - Settings can copy public helper values such as the current Entra redirect URI or environment variable names.
@@ -765,3 +839,302 @@ For each supported template, the contract should eventually define:
 1. Date is the only globally monotonic signal across a full academic year; week numbers reset per term, so week-primary ordering would interleave terms. Hence date-primary, week as tiebreak.
 2. Year inference is constrained to date-shaped strings to avoid trading the scramble bug for false orderings.
 3. Centralizing the parsing in one module keeps the reload sort and the consistency check consistent and avoids duplicated, drift-prone date logic.
+
+---
+
+## 42. OneNote Page-Record Reconciliation
+
+**Date:** August 27, 2026
+**Decision:** Archive capture is reconciled by stable OneNote page ID after a complete, paginated class discovery. Stored titles are presentation snapshots and must never determine whether a record is current, missing, or safe to retire.
+
+**Rules:**
+- Follow every Graph `@odata.nextLink` while listing pages for a section.
+- Treat every successfully paginated section as a safe reconciliation boundary. A failed section blocks mutation only for records belonging to that section.
+- During a partial class run, defer legacy records with no `diaryGroupId`; reconcile them only after every section lists successfully.
+- Add every returned page ID to the existence set before title/template filtering. Queue eligibility and OneNote existence are separate decisions.
+- Delete a stored page absent from its safe discovery scope only when its `entryCount` is zero.
+- Preserve a missing page with saved evidence and stamp `orphanedAt`; exclude it from current capture coverage and report it as an archived page no longer in OneNote.
+- Clear `orphanedAt` when the same stable page ID is discovered again.
+- Store section-list failures as `recordKind: section_error` and report them separately from page failures. A section failure is not "one failed page."
+- While a section failure is active, classify its page records (and legacy records without section metadata) as awaiting reconciliation rather than current page failures.
+- The notebook tree counter and archive verdict both describe the current reconciled page set. Historical orphan records remain queryable but do not inflate current failure counts.
+
+**Reasoning:** The notebook tree is current Graph state, while Firestore is cumulative historical state. Comparing counts across those sets creates apparently contradictory reports such as `29/29` beside `Captured except 4 pages`. Identity reconciliation makes that divergence explicit and preserves historical evidence without mistaking it for current missing work.
+
+---
+
+## 43. AI Model Selection Policy
+
+**Decision (2026-09-01):** model ids live in one catalog, `services/geminiModels.ts`, and the defaults are Google's floating `-latest` aliases rather than pinned versions.
+
+**Rules:**
+- Model ids appear in exactly one place. The `GeminiModel` type, the Settings selectors, the preference defaults, and the persistence validator all read the catalog. Ids were previously duplicated across five files and had drifted far enough that a newer model was labelled "Legacy fallback".
+- Retired ids stay in the catalog marked `deprecated` with a `replacedBy` target. They remain valid for stored preferences, so loading an old preference never silently resets a user's choice, and `resolveGeminiModel` substitutes the live model at call time so no settings visit is required after a withdrawal.
+- Retired ids are never offered as a choice, but a retired id still saved in preferences renders as a disabled option rather than leaving the select blank.
+- A model or credential failure is raised, never folded into a null parse result.
+
+**Reasoning:** pinned ids fail closed and loudly-but-invisibly — the withdrawal of `gemini-2.5-flash` returned a hard 404 that the parser reported as "no parsed entries available", indistinguishable from a page with nothing to parse, and went unnoticed until a debug log was read. Aliases trade a rare hard outage for gradual quality drift, which this app tolerates well: label-first parsing is the primary path, AI is an explicit fallback, and every AI result passes through `passOneQualityCheck` and `validateParsedEntry` before it is trusted. Pinned ids remain selectable for reproducible runs.
+
+---
+
+## 44. Page-Record Read Sharing
+
+**Decision (2026-09-01):** page-record reads are shared through a short-TTL, in-flight-deduplicated cache rather than by merging the subsystems that read them.
+
+**Rules:**
+- `listPageSyncRecordsForClasses` caches by uid plus sorted class ids. Concurrent callers share one query set; a read within the TTL is reused.
+- Every page-record write path invalidates the cache, so a stale badge cannot outlive the write that changed it.
+- Failed reads are not cached — one transient error must not be served for the whole window.
+- Effects that trigger these reads key on stable identifiers (class ids), never on the notebook tree object, whose identity changes on every structure update.
+
+**Reasoning:** four subsystems — tree badges, archive status, class dashboard, export — read the same records by design, and the 2026-08 read audit deliberately kept them separate rather than re-coupling them. That audit deferred the redundancy as "low volume"; multi-class sync invalidated the premise, with one 28-minute session logging 9,463 reads from this path. Caching at the query boundary preserves the separation the audit was protecting while removing the cost.
+
+---
+
+## 45. Graph Retry and Concurrency Tiering
+
+**Decision (2026-09-01):** retry belongs to the Microsoft Graph SDK; concurrency belongs to this app; they are separate layers and neither reimplements the other.
+
+**Rules:**
+- **Request retry is the SDK's.** `Client.initWithMiddleware` uses `MiddlewareFactory.getDefaultMiddlewareChain`, whose `RetryHandler` retries 429/503/504 three times and honours `Retry-After`. Do not add application-level Graph retry; a second, unreachable implementation (`fetchWithRetry`) previously existed and was deleted.
+- **Concurrency is ours**, because the SDK has no equivalent. `GraphConcurrencyMiddleware` is spliced immediately before `HTTPMessageHandler` — below `RetryHandler` — so a slot covers one network attempt rather than a whole retry sequence. A gate outside the retry loop would hold slots during backoff sleeps (up to 180s per attempt) and stall unrelated Graph work.
+- **The semaphore is shared; the middleware is not.** One module-level `ConcurrencyLimiter`, one adapter instance per client. `Middleware.setNext` is mutable instance state, so a shared middleware object would let a later client rewrite an earlier client's downstream handler.
+- **The chain comes from the SDK factory**, not hand-built, so future SDK composition changes are inherited (`RedirectHandler` is Node-only, for instance). The one maintained assumption — `HTTPMessageHandler` is last — is asserted at construction and in tests.
+- **Scope: per tab.** The semaphore coordinates one JavaScript realm. It does not coordinate across tabs, users, devices, or server processes.
+- **Recursive Graph traversal is sequential.** The gate bounds requests in flight; it does not bound the pending promise tree a recursive fan-out creates.
+
+**Layers, each answering a different question:**
+
+| Layer | Question | Timescale |
+| --- | --- | --- |
+| SDK `RetryHandler` | did this attempt fail transiently? | seconds |
+| `GraphConcurrencyMiddleware` | how many Graph requests exist at once, this tab? | request |
+| `batchPromises` | pacing and progress reporting | run |
+| Cooldown + `nextRetryAt` | should we back off after retries are exhausted? | minutes, across sessions |
+
+**Reasoning:** the proxy refactor deleted the custom fetch that the retry layer hung from, leaving `fetchWithRetry` and its limiter unreachable while the SDK quietly retried on its own — three overlapping mechanisms, one of them dead. Separating them by question rather than by convenience keeps a future contributor from adding a fourth.
+
+**Known limits and open questions:**
+- Microsoft documents OneNote delegated limits as **per app, per user** (5 concurrent, 120/min, 400/hour) and does not document a per-notebook bucket. Shared-notebook contention between collaborators is a hypothesis, not a confirmed rule; the observed `504 UnknownError` responses are service-side, not quota responses.
+- A concurrency gate does not enforce request-rate limits. **400 requests/hour per user is potentially the binding constraint** for the hosted pilot — measure Graph requests per completed sync run before designing around it. The cost of one run is currently unknown.
+- Be precise about what existing work reduces. The page-record cache is a *Firestore* cache and does not lower Graph usage. Reconciliation avoids downstream processing of records that no longer exist, and the "up to date" path skips page-*content* requests — but every full sync still lists notebooks, section groups, sections and pages. Telemetry must separate those endpoint families to show where the budget actually goes.
+- OneNote does not return `Retry-After` on 429, so `getGraphRetryAfterMs` returns null on that path and the app's fixed cooldown applies. The helper still matters for other Graph endpoints.
+- A deployment-wide gate would belong in the BFF, not the browser — but not every server-side Graph call goes through `/api/graph/*` (`listMicrosoftMemberships` calls Graph directly), and Cloud Run's max-instance setting is not a strict guarantee. Decide this from canary telemetry rather than in advance.
+
+---
+
+## 46. Feedback Provenance and the Two Identity Systems
+
+**Decision (2026-09-01):** every feedback record written from now on carries the author's identity, captured at send time. Cross-user review is deliberately not built yet.
+
+**Context — two unlinked identities.** A pilot user signs in twice:
+
+| | Identity | Determines |
+| --- | --- | --- |
+| Microsoft (Entra) | university UPN | collaboration role, class scope, and who the message is sent *from* |
+| Google (Firebase) | Google account | Firestore document ownership and rules |
+
+Nothing binds them. `isOwner()` in `firestore.rules` compares `request.auth.uid`, which is the Google identity; the collaboration profile is resolved server-side from the Microsoft identity. A user could sign into Firebase with any Google account.
+
+**Rules:**
+- `FeedbackHistoryRecord` carries `authorUpn`, `authorName`, `authorRole` and `authorFirebaseUid`. Both identities are stored so a mismatch is visible in the data rather than invisible.
+- `authorRole` is captured **at send time**, never resolved at read time. Roles change; an audit trail must say what was true when the message went.
+- Legacy records carry no author and stay unattributed on read. The UI labels them "author not recorded" rather than crediting the reader, who is frequently not the sender.
+- `authorFirebaseUid` is **required on new records and bound to the caller** (`data.authorFirebaseUid == request.auth.uid`). It is the one provenance field the rules can attest, because it is the identity the rules already run on. Legacy records predate it; reads and the `uptakeObservedAt` update path do not run the create validator, so they stay accessible.
+- `authorUpn`, `authorName` and `authorRole` remain optional and validated-when-present. They originate in the Microsoft session, which the rules cannot see, so they are **self-reported metadata, not audit evidence**, until the binding below lands.
+
+**Not built, deliberately:** owner/lead review of another user's sent feedback. `feedbackHistory` lives at `users/{uid}/feedbackHistory/...`, readable by its owner or by `isAdmin()`, with no `collectionGroup` rule — so it is readable in principle but not enumerable. `canReviewAllFeedback` in the access profile therefore has no surface behind it yet.
+
+**Reasoning:** the pilot replaced recipient-constrained sending with author identity as one of its working controls, but the record had no author field at all — the control existed on paper only. Stamping is cheap, independent, and must precede interns sending anything. A review surface is a larger question: enforcing "the lead may read all feedback" in Firestore rules would require a second role list keyed by Google email, duplicating the server's env-var and Graph-membership model in a different identity namespace. The better answer is `firebase-admin` on the BFF, so the server that already owns the access decision also mediates the read — and the same dependency would allow Firebase custom tokens, binding the Firebase identity to the Microsoft one and removing the two-identity problem at its root. That is deferred until there is a demonstrated need to review.
+
+**Update (2026-09-08) — the binding is now decided, not deferred.** A review of the provenance work found that validating these fields is not the same as attesting them: a pilot participant writing into their own subtree could claim any author and any role, and the UI renders the result as fact. `authorFirebaseUid` was bound to `request.auth.uid` immediately. For the Microsoft half the chosen route is **custom claims on the existing Google identity**: the BFF, which already resolves the authoritative profile in `getCollaborationAccess`, writes `upn` / `name` / `role` into the Firebase token via `firebase-admin`, and the rules compare each record field against `request.auth.token`. This needs no uid migration and no new write path, unlike the custom-token and write-proxy alternatives weighed above. Implementation sequence, rollout ordering and the stale-claim window: [docs/reference/feedback-attribution-plan.md](./docs/reference/feedback-attribution-plan.md). Cross-user review remains deferred and is the case that would justify the write-proxy option later.
+
+**Update (2026-10-06) — binding and review built (Track B).** The server writes `ms_upn`, `ms_name`, `ms_role`, `ms_classes` and `ms_bound_at` claims onto the Firebase sign-in from its own session (`POST /api/auth/firebase-binding`, `services/identityClaims.ts`); the client binds after both sign-ins, accepts the claims only while `ms_upn` matches the live Microsoft account, clears them before Microsoft sign-out (`hooks/useIdentityBinding.ts`), writes sent-feedback author fields from them, and waits for them before sending. Cross-user review did **not** need the write proxy after all: with role and class scope in the token, a read-only collection-group rule (`canReviewSentFeedback`) lets owner and lead read `feedbackHistory` within their classes, surfaced as the dashboard's "Sent Feedback Review" tab (`services/sentFeedbackReview.ts`). Rules do not yet *require* author fields to equal the claims on create — that tightening is deployed only after every pilot participant has signed in once and been bound, so nobody is locked out mid-send.
+
+---
+
+## 47. Page Freshness Is Decided by Content, Not OneNote's Modified Date
+
+**Date:** October 5, 2026
+**Decision:** Sync no longer trusts OneNote's page `lastModifiedDateTime` alone to skip label-first pages. A label-first page is downloaded when its last download (`lastReadAt`) is older than a refresh window, and a fingerprint of its content (`contentHash`) decides whether it is re-parsed and re-written. See `services/pageFreshness.ts`.
+
+**Evidence:** On diary pages copied from an older template, Graph reported the template's 2021 date all year while students wrote 2026 entries. The date check marked those pages up to date, so normal syncs captured nothing new: a Force re-sync of the four 2026 classes raised saved entries from 171/125/183 to 362/377/348 (Education A, Education B, Econ A). The date stayed at 2021 even after the re-read.
+
+**Rules:**
+- Label-first pages are queued when OneNote's date moved, or when `lastReadAt` is older than `REFRESH_WINDOW_MS` (12 hours). Not on every sync: OneNote allows 400 requests/hour per user (§45) and one full read of the four 2026 classes is ~160 requests, so "every page, every sync" would hit the limit after two or three syncs. Within the window a repeat sync costs only discovery listings. New entries can take up to the window to appear; Force re-sync bypasses it.
+- The window is per user. Each pilot participant syncs into their own `users/{uid}` subtree and has their own Graph allowance, so one person's syncs neither spend nor refresh another's. Firestore's daily quota is shared across the project, which is why repeat syncs must stay cheap.
+- After download, a page whose fingerprint matches the last *successful, non-empty* save is not re-parsed and its entries are not re-written — one download and one small page-record write. This keeps routine syncs within the Firestore free-tier write quota.
+- The fingerprint includes `PARSER_REVISION`, parser mode and template version. Bump `PARSER_REVISION` when label-first output changes for the same HTML so every page re-parses once.
+- AI-parsed classes keep the date check, because a re-read costs AI calls. Its blind spot for template-copied pages is known and accepted; Force re-sync is the remedy there.
+- Force re-sync bypasses both the date check and the fingerprint (`forceReparse` on the queue item).
+- A page record's `lastError` and `nextRetryAt` describe the latest attempt only and are deleted when a later write omits them. Before this, merge-writes silently kept months-old errors beside successful syncs.
+- **Sync never touches review work** (`services/syncReviewPreservation.ts`). Background sync used to save every parsed entry as a draft with empty feedback; because those fields are always written, a re-read page lost its Feedback Ready status and saved feedback. It rarely fired while stale dates kept pages from being re-read; the 2026-10-05 Force re-sync reset 8 entries, restored from Firestore's one-hour version history (`scripts/peer-attribution-report.ts --restore-snapshot`). Sync now carries an existing entry's status, review date and feedback across the content rewrite. This had to land before any change that makes re-reads routine.
+- Firestore point-in-time recovery is disabled on this database; only one hour of versions is kept. Recovering from a bad write requires acting within that hour.
+- Not yet changed: opening a page in the workspace still uses the date check to decide whether to re-parse. Regular syncs keep its saved data current; revisit if teachers see stale pages between syncs.
+
+---
+
+## 48. Firestore Enterprise Edition: Every Query Needs an Index
+
+**Date:** October 6, 2026
+**Context:** The app's database is Firestore **Enterprise edition** (Blaze plan, `asia-southeast1`), not Standard. Two Enterprise behaviours shape cost:
+- **No automatic field indexes.** A query whose filter has no matching index runs as a full collection scan. `users/{uid}/entries` held 2,482 documents across every class ever synced, so "entries for one class" scanned all 2,482 to return 129 (pipeline explain: `TableScan`, 4.61 MiB read, **1,180 read units for 129 documents**). Sync's per-page review-state query scanned the same 2,482 to return ~13, once per changed page.
+- **Reads are billed in read units by data volume,** not per document returned. Cloud Monitoring's `document/read_count` counts documents returned and under-reports cost by roughly 10× here; the Firebase console's billable metric shows the units (≈600K in the 24 hours of 2026-10-05/06, against 57K documents returned).
+
+**Rules:**
+- **Every query shape needs an index in `firestore.indexes.json`, added in the same change as the query** — the index-side twin of "every new Firestore path needs a rule". Equality on one field needs a one-field index; composite filters and orderings need a composite one. `firebase deploy --only firestore:indexes` is edition-aware (Enterprise default density is `DENSE`).
+- Verify a new query with the pipeline API's explain (`documents:executePipeline` with `explain_options.mode = analyze`); `runQuery` explain is not supported on Enterprise. The plan should show an index scan, and "records scanned" should be close to "records returned".
+- Judge read cost from the Firebase console's billable metrics or Billing reports, not from `document/read_count`.
+- Indexed as of this date: entries by `classId` and by `pageId`; pages by `classId`; feedbackReviewDecisions by `pageId`; plus the existing feedbackHistory and sync-queue composites.
+
+---
+
+## 49. Class Dashboard Loads Incrementally
+
+**Date:** October 6, 2026
+**Decision:** The Class Dashboard no longer re-reads every entry and page record of the selected classes on each open. `services/incrementalClassQuery.ts` loads a class's documents changed since the last load (`updatedAt` newer than a per-user, per-class watermark minus a 10-minute clock-skew margin) from the server, takes the rest from Firestore's persistent browser cache (§31), and checks the cached count against a server count aggregation. Any mismatch — a deletion, or the browser having evicted its storage — falls back to a full load. Loading lives in `hooks/useDashboardDataset.ts`.
+
+**Rules:**
+- Incremental loading is only for collections where **every write sets `updatedAt`**: entries and page records. feedbackHistory's uptake toggle changes a record without touching `updatedAt` (and its rule allows only that field), so feedback history always loads in full; it is small.
+- Each incremental query needs a `(classId, updatedAt)` index (§48).
+- App bumps a `dataVersion` when a sync finishes; the open dashboard then loads incrementally on its own. "Reload saved data" in the dashboard header forces a full load (e.g. after a sync in another tab or on another device) and shows when the data was loaded. A two-minute in-memory copy still serves instant reopens with no reads.
+- Exports, the notebook-tree badges and sync keep full loads: they must be exact and are not the hot path.
+- The Peer & Intern Feedback configuration (confirmed names, interns, class settings) is read once per session and class set and shared across mounts (`hooks/usePeerFeedbackConfig.ts`): it is written only through that hook, which keeps the session copy current. Measured before: ~300 reads per Peer tab open, growing with each confirmed name.
+- The browser cache is **not** cleared on sign-out, by owner decision (2026-10-06): shared-machine use is handled by local policy. It persists across browser restarts and is removed only by clearing site data, a private window closing, or browser eviction (Safari: ~7 days unused) — the count check covers eviction.
+
+**Expected effect:** a reopen costs the changed documents plus one count per class and collection, instead of every document (~1,500 entries for the four 2026 classes, growing each week).
+
+
+## 50. CI: One Verify Job, Deploys Stay Manual
+
+**Date:** October 13, 2026
+**Decision:** GitHub Actions runs `npm run verify` (type check, full test suite, production build) on every pull request and on every push to `main` (`.github/workflows/verify.yml`). It is the same command run locally before handing work back, on the Node version pinned in `.nvmrc` (the Dockerfile uses the same version), so a green check means what a green local run means.
+
+**Rules:**
+- The workflow stays equal to `npm run verify`. New checks go into that script, or into a separate job with a stated reason, not into one-off workflow steps that a local run cannot reproduce.
+- No secrets in CI. The build falls back to an empty `BROWSER_GEMINI_API_KEY` (the server's `GEMINI_API_KEY` is never read by the build), and nothing calls Microsoft, Firebase or Gemini. If a future step seems to need a secret, treat that as a design question first.
+- Permissions are read-only (`contents: read`). Only GitHub-owned actions are used, pinned to a major version.
+- Deploys are not part of CI. `scripts/deploy-cloud-run.sh` stays a deliberate manual step (docs/collaboration-pilot-deployment.md).
+- The repository is private. Whether the check can be *required* before merge depends on its GitHub plan; until it is enforced, a red check is blocking by convention, not by the platform.
+
+**Not covered yet:**
+- Firestore rules and indexes have no automated tests (§48). This is the largest gap; it needs the Firebase emulator and rules unit tests.
+- Dependency audit: `npm audit --omit=dev` reports vulnerabilities in production dependencies. Add it as a non-blocking job once the findings are triaged.
+- The container build (Dockerfile) is exercised only by the deploy script. Add a CI job if a container-only break occurs.
+- Microsoft and Google sign-in flows and hosted-app behavior remain manual checks.
+
+## 51. Names: DiaryPipeline for the Research, Notebook Feedback Studio for the App
+
+**Decision (2026-10-14):** the project has two names with distinct jobs.
+
+- **DiaryPipeline** names the research software: both GitHub repos, the public
+  `DiaryPipeline-Showcase`, `CITATION.cff` and the Zenodo record (concept DOI
+  10.5281/zenodo.23281910). It does not change; renaming it would split
+  citations.
+- **Notebook Feedback Studio** names the app people use: page title, app
+  header, settings, `metadata.json`, `package.json`. "Feedback" because the
+  app's purpose is teacher feedback, "Notebook" because it works on OneNote
+  Class Notebook content in general (diaries and, via Assignments mode, other
+  work), not diaries only.
+
+Rejected: "Feedback Studio" alone (Turnitin's product name, widely used in
+universities); "Journaler" and "Journal Feedback Pipeline" ("journal" adds a
+third term beside the "diary" the UI uses, and "pipeline" repeats the research
+name); "Diary Feedback" (too narrow once non-diary feedback exists).
+
+Unchanged on purpose: the Cloud Run service `journaler`, its URL and the
+Secret Manager names. They are invisible to users, and renaming them would
+change the OAuth redirect URI and the deploy configuration. Earlier entries in
+this document and in CHANGELOG that say "Journaler" are historical.
+
+## 52. Diary Display Order Follows Dates, With Advisory Week Conflicts
+
+**Decision (2026-11-17):** date controls diary display order; week number breaks
+date ties and orders entries whose date cannot be read. The shared chronology
+helper accepts compact English month dates, ordinal days, day-first month names,
+and full-width digits/punctuation. Year inference is per page, not across a whole
+multi-class dataset. Stored text, entry IDs, and review/feedback associations stay
+unchanged. Fresh and saved workspace entries use this same ordering after ID and
+saved-state reconciliation, before entering the display cache.
+
+**Update (2026-11-20):** valid numeric dates with two-digit years participate in
+page-year inference, using the same century convention as the existing numeric
+date parser. For example, `4/30/26` lends 2026 to a neighbouring `May 1`. The most
+frequent written year still wins, ties favour the earlier year, and inference
+remains local to each page. Student-written values are unchanged.
+
+Week order is advisory. A decrease to a week above 3 between adjacent dated
+entries no more than 21 days apart flags both entries as a possible disagreement;
+it does not decide which value is wrong. Low-numbered resets are allowed as term
+restarts. Unknown dates do not generate this warning. Existing parser warnings
+are retained, and display warnings are recomputed on load so old records benefit
+without a force re-parse. Date/week warnings remain visible after Feedback Ready,
+behind the same collapsed Entry Warnings disclosure used for parser diagnostics.
+
+This was checked against the two reported diaries: full-width punctuation and
+week digits obscured one ordering issue, while ordinal days and year-less dates
+obscured the other. Both also contain written dates that disagree with week
+sequence; the app exposes that evidence rather than correcting student work.
+
+## 53. AI Feedback Review
+
+**Date:** November 18, 2026
+**Decision:** The per-field "AI Draft" button, where the AI wrote student-facing feedback, was replaced by **Review my feedback**. The instructor or intern writes the feedback; a server-side AI reviewer comments on *their* draft in a side pane. Spec: `docs/superpowers/specs/2026-11-18-ai-feedback-review-design.md` (rev 2). Evaluation before wider rollout: `docs/reference/ai-review-evaluation.md`.
+
+**The promise:** AI never sends anything to a student and never changes the person's text on its own. A suggested wording reaches the feedback only when the person clicks **Apply** on that one comment. The person can still edit or undo it, and the person sends. Sent feedback stays `source: 'human'`; AI assistance is recorded separately and never relabelled as authorship.
+
+**Rules:**
+- **Access order (server-enforced, all before any Gemini call or write):** Microsoft session (401 `not_authenticated`); `canUseAiReview` (403 `not_enabled`; the owner and non-pilot single-user mode always have it, `lead`/`intern` only when listed in `AI_REVIEW_ROLES`); Gemini key configured (503 `not_configured`); Firebase ID token verifies (401 `invalid_firebase_token`); the token's `ms_upn` equals the session UPN in pilot mode (403 `identity_not_bound`); class allowed (403 `class_not_allowed`); entry association by point reads (409 `entry_not_saved`); request validation (400 `invalid_request`); rate limit (429 `rate_limited`). Entry association requires the saved entry's `pageId` and `classId` to match the request and the saved page's `classId` to match too.
+- **Inputs:** student content is read on the server from the saved entry (never trusted from the client). The feedback text is the person's current, possibly unsaved, draft. Prior context is the student's last 3 sent records, fetched by id and checked for same class and same student UPN (or page). Model must be a non-deprecated catalog id, else the feedback default. The reviewer uses the new `reviewFocus` preference, not the retired drafting prompts. Inputs are capped: student content 12,000 chars, each prior record 2,000, and a combined 30,000 budget; whatever was cut is recorded in `inputs.truncated` (`studentContent`, `priorFeedbackIds`).
+- **Reviewer behaviour:** comments are addressed to the instructor, never the student; each states a basis (`student_text`, `prior_feedback`, `general_practice`); zero comments with a summary is a valid review; the summary names one strength. Priorities: accuracy of the instructor's own corrections first, then anchoring, correction form, specific praise, focus, one forward-looking "next time", continuity, tone and clarity for an L1-Japanese learner. Student and prior text are delimited and neutralised in the prompt so they cannot close a block.
+- **Suggestion safety (server sanitiser):** a quote must occur exactly once in the draft; a missing or repeated quote becomes a whole-message comment (offsets -1, no suggestion). A suggestion is dropped when its quote exceeds 50% of the draft or 400 chars; when the suggestion exceeds 400 chars or 2x the quote plus 60; or when it would grow the draft by more than max(20, 25% of the draft). Overlapping suggestions keep the first. At most 6 comments.
+- **Apply (client):** each review has an expected text, starting as the snapshot and changing only on a successful Apply (later offsets shift). Apply is enabled only while the current text equals it; any manual edit disables every Apply on that review and the pane says to Re-review. No "apply all".
+- **Record contract:** `users/{uid}/aiFeedbackReviews/{reviewId}`, written by the server with `firebase-admin`, schema version 1. It holds author fields, `classId`, `pageId`, `entryId`, `fieldKey`, the full `inputs` snapshot (feedback text, student content, focus and its source, tone, item-count setting, prior feedback, model, `promptVersion: 'review-v1'`, `truncated`), `supersedesReviewId` on a re-review of the same entry and field, `summary`, `comments[]` and `outcomes`. Rules: clients may read their own records and never write.
+- **Outcomes:** `POST /api/ai/review-feedback/outcome` records `applied` or `dismissed` per comment inside a transaction, writing only `outcomes.<commentId>` and `updatedAt`. Applied is final; dismissed may become applied, never back. Each outcome carries `byUpn` (the acting bound Microsoft identity). In pilot mode only the review's author may record outcomes (403 `not_review_author`), so a different Google account rebound onto the same Firebase uid cannot. A comment with no outcome is unresolved. A failed save keeps the local state pending and shows "Couldn't save that — retry".
+- **Link to sent feedback:** a sent `FeedbackHistoryRecord` may carry `aiReviewIds` (at most 20, ordered: the current review of each field, then reviews with an applied outcome, then the rest newest first) and `aiReviewIdsOmitted` (count that did not fit: a non-negative integer, written as 0 whenever any review is linked; older records without the field hydrate to 0). The `feedbackHistory` create rule allows both. `source` stays `'human'`.
+- **Caveats (known, accepted):**
+  - Prior context is sent only when the prior-feedback mode is not Off. The default is Off, so by default the reviewer sees no prior sent feedback.
+  - `aiReviewIds` covers only reviews run in this browser session. Reviews run before a reload are saved but not linked to the sent record.
+  - The outcome route checks session, token, binding and authorship, but not the person's current role or class. A person whose role is removed can still record outcomes on their own earlier reviews. This is intended: outcomes describe past assistance.
+- **Research meaning of "applied":** the person clicked Apply. It is not evidence that the wording was sent unchanged. Compare `feedbackTextSnapshot`, the suggestions, and the sent `content`. Dismissal is normal and is never treated as poor performance.
+- **Client state:** scoped to the Firebase uid plus the Microsoft UPN, with an auth epoch that only increases. State clears when either changes; a response from an older generation, key, or epoch is discarded.
+- **Unavailable is not hidden (§22):** the button uses `aria-disabled` and a `title`; clicking while unavailable opens the pane with the reason and the action (role not enabled, not configured, Microsoft or Google sign-in, identity binding, entry not saved, empty feedback).
+- **Prerequisite recovery:** an unsaved entry is a neutral workflow step. In the review pane, **Save draft and review** shows "Saving draft…", waits for a successful save, then reviews the latest draft without changing it. A failed save shows "Couldn't save the draft — retry". Changing the account, entry or field cancels automatic continuation. Fixable server messages clear on successful recovery; saving through the bottom bar clears an entry-not-saved message without starting a review. The bottom bar's **Save Draft** action remains a save-only action.
+- **Rate limit:** 30 reviews per user per rolling hour, held in memory per instance. It is a development safeguard, **not a deployment-wide spending ceiling**; a Gemini quota or budget alert is the real cap.
+- **Deploy:** `GEMINI_API_KEY` is a Secret Manager runtime secret and the deploy now fails if it is missing. The runtime service account needs `roles/datastore.user`. Rules are deployed by the user (`firebase deploy --only firestore:rules`). `AI_REVIEW_ROLES` stays unset (owner-only) until the owner has run the evaluation. Steps: `docs/collaboration-pilot-deployment.md`.
+- **Build context:** `.dockerignore` and `.gcloudignore` keep `.env*` out of the build, and `.gcloudignore` includes `.gitignore`. A test checks this.
+
+**Reasoning:**
+- Human feedback stays primary, which keeps the student and teacher conversation authentic, and the AI's role of coaching the feedback-giver (especially interns) stays separate from any future AI-to-student role.
+- A browser key cannot safely be turned on for hosted interns, so the call runs on the server and the key never reaches the bundle.
+- Saving every review with its inputs, plus per-comment outcomes, makes the feature researchable.
+
+**Not built:**
+- Floating comments anchored inside the text. Comments carry exact quotes and offsets, so this can be layered on.
+- Viewing past reviews in the UI after a reload (the data is saved), owner or lead reading others' reviews, a research dashboard.
+- Moving the other browser AI features (parsing fallback, analysis) to the server.
+- Patterns beyond the last 3 sent feedback records.
+- **Firestore rules tests:** the rules for `aiFeedbackReviews` and for `aiReviewIds` / `aiReviewIdsOmitted` on `feedbackHistory` have no emulator tests, because the repo has no rules test harness (§48, §50).
+
+## 54. Pilot Scales to Zero Between Visits
+
+**Decision (2026-11-20):** the Cloud Run pilot uses a service-level minimum of
+zero instances and retains the maximum of one. The owner judged the always-on
+instance cost unnecessary given distributed intern use. The deployment script
+defaults to `MIN_INSTANCES=0`; the live setting can be applied with
+`gcloud run services update journaler --min=0` and the configured project and
+region, without deploying a new revision.
+
+The accepted tradeoff is a possible cold start and another Microsoft sign-in
+after idle shutdown. Both the Express session store and the Microsoft token cache
+are process-local, so the session idle timeout cannot keep them across a shutdown.
+Saved Firestore records persist independently of the instance. The browser's
+activity-based session pings remain in place so active Firestore-only work still
+renews the server session; they stop after inactivity and do not guarantee that
+an instance stays running.
+
+A durable session store, including the Microsoft token cache, is still required
+before uninterrupted sessions become a requirement or the instance cap increases.
+This decision removes the always-on capacity floor; active use and other cloud
+resources retain their normal charges. Operational steps and rollback (set the
+service minimum back to one) are in `docs/collaboration-pilot-deployment.md`.

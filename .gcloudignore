@@ -1,0 +1,20 @@
+#!include:.gitignore
+# Used by `gcloud run deploy --source`. This file REPLACES gcloud's default
+# .gitignore fallback, so the include above pulls .gitignore back in; the rules
+# below add build-context exclusions on top of it. Check with:
+#   gcloud meta list-files-for-upload
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+deploy/*.env
+migrated_prompt_history/
+node_modules
+dist
+coverage
+.claude
+.superpowers
+.playwright-mcp
+*.log
+.DS_Store

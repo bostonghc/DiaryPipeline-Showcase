@@ -45,6 +45,36 @@ service cloud.firestore {
     //   - studentNumber: string (optional, max 1000) - Extracted institutional student number
     //   - updatedAt: string (required) - ISO 8601 date string
     //
+    // Collection: users/{userId}/classes/{classId}/contributorAliases
+    // Document ID: encodeURIComponent("{groupId or *}|{label}") — one per scope and label
+    // Fields (teacher-confirmed peer-feedback label → person):
+    //   - classId: string (required, == parent classId)
+    //   - label: string (required, 1-200) - Normalized diary comment label
+    //   - targetKind: string (required) - 'student' or 'intern'
+    //   - targetKey: string (required, 1-1000) - Student key (UPN/Graph ID/name key) or intern UPN
+    //   - groupId: string (optional, 1-1000) - Diary group the alias is limited to
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/classes/{classId}/peerFeedbackSettings
+    // Document ID: 'class'
+    // Fields:
+    //   - classId: string (required, == parent classId)
+    //   - excludedAuthorKeys: list (required, max 200) - Pages left out of peer feedback (e.g. test pages)
+    //   - termBoundary: string (optional, YYYY-MM-DD) - Class override of the shared term split
+    //   - departures: map (optional, max 200) - Author key → YYYY-MM-DD the student left the class
+    //   - dismissedDepartures: list (optional, max 200) - Dismissed "no longer in class?" suggestions
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //
+    // Collection: users/{userId}/peerFeedbackSettings
+    // Document ID: 'interns'
+    // Fields:
+    //   - interns: list (required, max 50) - { upn, displayName, labels[], activeFrom?, activeUntil? }
+    //   - updatedAt: string (required) - ISO 8601 date string
+    // Document ID: 'cohort'
+    // Fields:
+    //   - termBoundary: string (optional, YYYY-MM-DD) - Shared term split; a class's own date overrides it
+    //   - updatedAt: string (required) - ISO 8601 date string
+    //
     // Collection: users/{userId}/entries
     // Document ID: {entryId}
     // Fields:
@@ -84,6 +114,7 @@ service cloud.firestore {
     // Fields:
     //   - pageId: string (required, immutable, max 1000) - Microsoft Graph page ID
     //   - classId: string (required, immutable, max 1000) - Class ID
+    //   - recordKind: string (optional) - 'page' or synthetic 'section_error'
     //   - pageTitle: string (optional, max 1000) - OneNote page title
     //   - studentName: string (optional, max 1000) - Student name
     //   - diaryGroupId: string (optional, max 1000) - Collaboration-space diary group ID
@@ -99,6 +130,9 @@ service cloud.firestore {
     //   - lastViewedAt: string (optional) - ISO 8601 date string
     //   - lastError: string (optional, max 500000) - Last sync/parse error
     //   - nextRetryAt: string (optional) - ISO 8601 date string
+    //   - orphanedAt: string (optional) - Set when saved evidence is no longer present in complete OneNote discovery
+    //   - contentHash: string (optional, max 200) - Fingerprint of the content last saved; unchanged pages skip re-parsing
+    //   - lastReadAt: string (optional) - Last content download; label-first pages refresh at most once per window
     //   - updatedAt: string (required) - ISO 8601 date string
     //
     // Collection: users/{userId}/syncJobs/{jobId}
@@ -156,7 +190,7 @@ service cloud.firestore {
     function isAdmin() {
       return isAuthenticated() &&
         (
-          (request.auth.token.email == "ghcarr@gmail.com" && request.auth.token.email_verified == true) ||
+          (request.auth.token.email == "bootstrap-admin@example.invalid" && request.auth.token.email_verified == true) ||
           (
             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
@@ -257,6 +291,38 @@ service cloud.firestore {
              isValidDateString(data.updatedAt);
     }
 
+    function isValidContributorAlias(data, classId) {
+      return hasOnlyAllowedFields(['classId', 'label', 'targetKind', 'targetKey', 'groupId', 'updatedAt']) &&
+             data.classId is string && data.classId == classId &&
+             data.label is string && data.label.size() > 0 && data.label.size() <= 200 &&
+             data.targetKind in ['student', 'intern'] &&
+             data.targetKey is string && data.targetKey.size() > 0 && data.targetKey.size() <= 1000 &&
+             isValidOptionalString(data, 'groupId', 1, 1000) &&
+             isValidDateString(data.updatedAt);
+    }
+
+    function isValidClassPeerSettings(data, classId) {
+      return hasOnlyAllowedFields(['classId', 'excludedAuthorKeys', 'termBoundary', 'departures', 'dismissedDepartures', 'updatedAt']) &&
+             data.classId is string && data.classId == classId &&
+             data.excludedAuthorKeys is list && data.excludedAuthorKeys.size() <= 200 &&
+             (!('departures' in data) || (data.departures is map && data.departures.size() <= 200)) &&
+             (!('dismissedDepartures' in data) || (data.dismissedDepartures is list && data.dismissedDepartures.size() <= 200)) &&
+             isValidOptionalString(data, 'termBoundary', 10, 10) &&
+             isValidDateString(data.updatedAt);
+    }
+
+    function isValidInternProfiles(data) {
+      return hasOnlyAllowedFields(['interns', 'updatedAt']) &&
+             data.interns is list && data.interns.size() <= 50 &&
+             isValidDateString(data.updatedAt);
+    }
+
+    function isValidCohortPeerSettings(data) {
+      return hasOnlyAllowedFields(['termBoundary', 'updatedAt']) &&
+             isValidOptionalString(data, 'termBoundary', 10, 10) &&
+             isValidDateString(data.updatedAt);
+    }
+
     function isValidJournalEntry(data, entryId) {
       return hasOnlyAllowedFields([
                'entryId', 'pageId', 'pageTitle', 'classId', 'diaryGroupId', 'diaryGroupName', 'studentName', 'studentGraphId', 'studentUpn', 'date', 'weekNumber', 'weather',
@@ -302,12 +368,13 @@ service cloud.firestore {
 
     function isValidPageSyncRecord(data, pageId) {
       return hasOnlyAllowedFields([
-               'pageId', 'classId', 'pageTitle', 'studentName', 'diaryGroupId', 'diaryGroupName', 'studentGraphId', 'studentUpn', 'parserMode', 'templateVersion',
+               'pageId', 'classId', 'recordKind', 'pageTitle', 'studentName', 'diaryGroupId', 'diaryGroupName', 'studentGraphId', 'studentUpn', 'parserMode', 'templateVersion',
                'syncState', 'entryCount', 'oneNoteLastModified', 'lastParsedAt', 'lastViewedAt',
-               'lastError', 'nextRetryAt', 'updatedAt'
+               'lastError', 'nextRetryAt', 'orphanedAt', 'contentHash', 'lastReadAt', 'updatedAt'
              ]) &&
              data.pageId is string && data.pageId == pageId && data.pageId.size() > 0 && data.pageId.size() < 1000 &&
              data.classId is string && data.classId.size() > 0 && data.classId.size() < 1000 &&
+             (!('recordKind' in data) || data.recordKind in ['page', 'section_error']) &&
              isValidOptionalString(data, 'pageTitle', 0, 1000) &&
              isValidOptionalString(data, 'studentName', 0, 1000) &&
              isValidOptionalString(data, 'diaryGroupId', 0, 1000) &&
@@ -323,7 +390,36 @@ service cloud.firestore {
              isValidOptionalString(data, 'lastViewedAt', 0, 500) &&
              isValidOptionalString(data, 'lastError', 0, 500000) &&
              isValidOptionalString(data, 'nextRetryAt', 0, 500) &&
+             isValidOptionalString(data, 'orphanedAt', 0, 500) &&
+             isValidOptionalString(data, 'contentHash', 0, 200) &&
+             isValidOptionalString(data, 'lastReadAt', 0, 500) &&
              isValidDateString(data.updatedAt);
+    }
+
+    // Rules cannot iterate a list, so each possible index is checked (unrolled,
+    // short-circuiting on size). Cap is 20 entries, all strings.
+    function isStringListUpTo20(l) {
+      return l is list && l.size() <= 20 &&
+             (l.size() <= 0 || l[0] is string) &&
+             (l.size() <= 1 || l[1] is string) &&
+             (l.size() <= 2 || l[2] is string) &&
+             (l.size() <= 3 || l[3] is string) &&
+             (l.size() <= 4 || l[4] is string) &&
+             (l.size() <= 5 || l[5] is string) &&
+             (l.size() <= 6 || l[6] is string) &&
+             (l.size() <= 7 || l[7] is string) &&
+             (l.size() <= 8 || l[8] is string) &&
+             (l.size() <= 9 || l[9] is string) &&
+             (l.size() <= 10 || l[10] is string) &&
+             (l.size() <= 11 || l[11] is string) &&
+             (l.size() <= 12 || l[12] is string) &&
+             (l.size() <= 13 || l[13] is string) &&
+             (l.size() <= 14 || l[14] is string) &&
+             (l.size() <= 15 || l[15] is string) &&
+             (l.size() <= 16 || l[16] is string) &&
+             (l.size() <= 17 || l[17] is string) &&
+             (l.size() <= 18 || l[18] is string) &&
+             (l.size() <= 19 || l[19] is string);
     }
 
     function isValidFeedbackHistoryRecord(data, feedbackId) {
@@ -336,7 +432,11 @@ service cloud.firestore {
                'formatVersion', 'structuredFeedback', 'entrySnapshot',
                // Analytics-event metadata (optional; captured at send time):
                'uptakeObservedAt', 'itemCountSetting', 'priorFeedbackMode',
-               'recipientResolutionSource'
+               'recipientResolutionSource',
+               // Provenance (optional; legacy records carry none):
+               'authorUpn', 'authorName', 'authorRole', 'authorFirebaseUid',
+               // AI assistance (optional): ids of AI reviews run on this entry.
+               'aiReviewIds', 'aiReviewIdsOmitted'
              ]) &&
              data.feedbackId is string && data.feedbackId == feedbackId && data.feedbackId.size() > 0 && data.feedbackId.size() < 1000 &&
              data.classId is string && data.classId.size() > 0 && data.classId.size() < 1000 &&
@@ -358,7 +458,23 @@ service cloud.firestore {
              (!('itemCountSetting' in data) || data.itemCountSetting in ['1-2', '3-4', '5+']) &&
              (!('priorFeedbackMode' in data) || data.priorFeedbackMode in ['off', 'reference', 'include']) &&
              (!('recipientResolutionSource' in data) || data.recipientResolutionSource in ['roster', 'graph_search', 'manual']) &&
-             (!('uptakeObservedAt' in data) || data.uptakeObservedAt == null || isValidDateString(data.uptakeObservedAt));
+             (!('uptakeObservedAt' in data) || data.uptakeObservedAt == null || isValidDateString(data.uptakeObservedAt)) &&
+             (!('aiReviewIds' in data) || isStringListUpTo20(data.aiReviewIds)) &&
+             (!('aiReviewIdsOmitted' in data) || (data.aiReviewIdsOmitted is int && data.aiReviewIdsOmitted >= 0)) &&
+             isValidOptionalString(data, 'authorUpn', 0, 1000) &&
+             isValidOptionalString(data, 'authorName', 0, 1000) &&
+             // Provenance is attested, not self-reported. The server writes the
+             // sender's Microsoft identity onto their Firebase sign-in as ms_*
+             // custom claims (identity binding, ARCHITECTURE §46), and each
+             // author field must equal its claim. An unbound sign-in has no
+             // claims, so it cannot create a record. Enforced from 2026-10-14,
+             // after every pilot participant was bound
+             // (docs/reference/feedback-attribution-plan.md).
+             data.authorFirebaseUid == request.auth.uid &&
+             data.authorUpn == request.auth.token.ms_upn &&
+             data.authorName == request.auth.token.ms_name &&
+             data.authorRole == request.auth.token.ms_role &&
+             data.authorRole in ['owner', 'lead', 'intern'];
     }
 
     function isValidFeedbackReviewDecisionRecord(data, decisionId) {
@@ -383,6 +499,35 @@ service cloud.firestore {
     // ===============================================================
     // Rules
     // ===============================================================
+
+    // Track B review (ARCHITECTURE §46): owner and lead may read feedback sent
+    // through the app by any pilot participant, within their classes. Role and
+    // class scope come from identity claims the server writes onto the Firebase
+    // sign-in (POST /api/auth/firebase-binding); a token without them is denied.
+    // Adds read access only; the per-user rules below are unchanged.
+    function canReviewSentFeedback(classId) {
+      return isAuthenticated() &&
+             request.auth.token.ms_role in ['owner', 'lead'] &&
+             (request.auth.token.ms_classes == 'all' || classId in request.auth.token.ms_classes);
+    }
+
+    match /{path=**}/feedbackHistory/{feedbackId} {
+      allow read: if canReviewSentFeedback(resource.data.classId);
+    }
+
+    // Intern group assignments, published by the owner from the intern list so
+    // each intern's app can limit what it shows and syncs to their groups
+    // (services/internScope.ts). Any bound pilot member may read; only a token
+    // whose claims say owner may write.
+    match /pilot/assignments {
+      allow read: if isAuthenticated() && request.auth.token.ms_upn is string;
+      allow write: if isAuthenticated() &&
+                   request.auth.token.ms_role == 'owner' &&
+                   request.resource.data.keys().hasOnly(['interns', 'updatedAt']) &&
+                   request.resource.data.interns is list &&
+                   request.resource.data.interns.size() <= 50 &&
+                   isValidDateString(request.resource.data.updatedAt);
+    }
 
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
@@ -441,6 +586,38 @@ service cloud.firestore {
 
           allow delete: if isOwner(userId) || isAdmin();
         }
+
+        // Peer & Intern Feedback: teacher-confirmed label → person mappings.
+        match /contributorAliases/{aliasId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create, update: if isOwner(userId) &&
+                                hasRequiredFields(['classId', 'label', 'targetKind', 'targetKey', 'updatedAt']) &&
+                                isValidContributorAlias(request.resource.data, classId);
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+
+        // Peer & Intern Feedback: per-class exclusions and display term date.
+        match /peerFeedbackSettings/{settingsId} {
+          allow read: if isOwner(userId) || isAdmin();
+          allow create, update: if isOwner(userId) &&
+                                settingsId == 'class' &&
+                                hasRequiredFields(['classId', 'excludedAuthorKeys', 'updatedAt']) &&
+                                isValidClassPeerSettings(request.resource.data, classId);
+          allow delete: if isOwner(userId) || isAdmin();
+        }
+      }
+
+      // Peer & Intern Feedback: the teacher's cohort intern list and shared term split.
+      match /peerFeedbackSettings/{settingsId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) &&
+                              ((settingsId == 'interns' &&
+                                hasRequiredFields(['interns', 'updatedAt']) &&
+                                isValidInternProfiles(request.resource.data)) ||
+                               (settingsId == 'cohort' &&
+                                hasRequiredFields(['updatedAt']) &&
+                                isValidCohortPeerSettings(request.resource.data)));
+        allow delete: if isOwner(userId) || isAdmin();
       }
 
       match /entries/{entryId} {
@@ -478,9 +655,14 @@ service cloud.firestore {
         allow read: if isOwner(userId) || isAdmin();
 
         allow create: if isOwner(userId) &&
+                      // authorFirebaseUid is required on new records: an audit trail
+                      // that a client can opt out of is not an audit trail. Legacy
+                      // records predate it, but reads and the uptakeObservedAt update
+                      // path do not run this check, so they stay accessible.
                       hasRequiredFields(['feedbackId', 'classId', 'pageId', 'entryId',
                                          'studentUpn', 'studentName', 'channel',
-                                         'sentAt', 'source', 'fieldsAddressed', 'content', 'updatedAt']) &&
+                                         'sentAt', 'source', 'fieldsAddressed', 'content', 'updatedAt',
+                                         'authorFirebaseUid', 'authorUpn', 'authorName', 'authorRole']) &&
                       isValidFeedbackHistoryRecord(request.resource.data, feedbackId);
 
         allow update: if isAdmin() ||
@@ -490,6 +672,13 @@ service cloud.firestore {
                         isValidDateString(request.resource.data.uptakeObservedAt)));
 
         allow delete: if isAdmin();
+      }
+
+      // AI feedback reviews. Written only by the server (firebase-admin bypasses
+      // rules); clients may read their own records and never write.
+      match /aiFeedbackReviews/{reviewId} {
+        allow read: if isOwner(userId);
+        allow write: if false;
       }
 
       // Append-only internal provenance for entries the teacher reviewed and

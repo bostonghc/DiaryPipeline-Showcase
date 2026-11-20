@@ -6,17 +6,27 @@ import {
   DIARY_PARSE_TABLE_SYSTEM_INSTRUCTION,
   DIARY_PARSE_SEMANTIC_SYSTEM_INSTRUCTION,
   diaryParseUserPrompt,
-  fieldFeedbackSystemInstruction,
-  fieldFeedbackUserPrompt,
   ENTRY_ANALYSIS_SYSTEM_INSTRUCTION,
   entryAnalysisUserPrompt,
 } from "./prompts";
 import { TemplateVersion } from "../types";
+import type { AiCallOutcome, AiCallPurpose } from "./aiMeter";
+import { recordAiAttempt, recordAiOutcome } from "./aiMeter";
+import {
+  DEFAULT_FEEDBACK_MODEL,
+  DEFAULT_PARSING_MODEL,
+  resolveGeminiModel,
+} from "./geminiModels";
 
 const getGeminiApiKey = (): string => {
-  const key = process.env.GEMINI_API_KEY || process.env.API_KEY || '';
+  const key = process.env.BROWSER_GEMINI_API_KEY || '';
   if (!key) {
-    throw new Error("Missing Gemini API key. Set GEMINI_API_KEY in .env.local and restart the dev server.");
+    throw new Error(
+      "Missing browser Gemini API key. This key is for local development only: " +
+      "set BROWSER_GEMINI_API_KEY in .env.local and restart the dev server. " +
+      "In a hosted deployment AI review runs on the server, and no key is " +
+      "built into the browser bundle."
+    );
   }
   return key;
 };
@@ -142,21 +152,90 @@ const cleanHTMLForAI = (html: string): string => {
 /**
  * Helper to execute an AI call with exponential backoff for 429 errors.
  */
-const withRetry = async <T>(fn: () => Promise<T>, maxRetries: number = 3, onRetry?: (attempt: number, delay: number) => void): Promise<T> => {
+const isGeminiRateLimitError = (error: any): boolean => {
+  const message = String(error?.message || error || '');
+  return message.includes('429') || message.includes('RESOURCE_EXHAUSTED');
+};
+
+const isGeminiBillingOrProjectRestriction = (error: any): boolean => {
+  const message = String(error?.message || error || '').toLowerCase();
+  return /prepay|billing|payment|paid tier|project.+restricted|api.+not enabled|permission denied|api key not valid/.test(message);
+};
+
+/**
+ * A retired or misspelled model id returns a hard 404 that no retry can fix.
+ * It must be distinguishable from "this page had nothing to parse" — the two
+ * were indistinguishable in the UI, which is why a model retirement went
+ * unnoticed until the debug log was read.
+ */
+export class GeminiModelUnavailableError extends Error {
+  readonly model: string;
+  constructor(model: string, detail: string) {
+    super(`AI model "${model}" is unavailable: ${detail}`);
+    this.name = 'GeminiModelUnavailableError';
+    this.model = model;
+  }
+}
+
+export const isGeminiModelUnavailableError = (error: any): boolean => {
+  if (error instanceof GeminiModelUnavailableError) return true;
+  const message = String(error?.message || error || '').toLowerCase();
+  // A missing key is the same class of failure as a retired model: every page
+  // fails identically for a configuration reason, and it must not read as
+  // "this page had nothing to parse". The hosted pilot ships without a key
+  // (vite bakes it into the browser bundle, so it cannot be supplied safely
+  // there), which makes this the expected production path rather than an edge
+  // case.
+  if (message.includes('missing gemini api key')) return true;
+  return (
+    (message.includes('404') || message.includes('not_found')) &&
+    (message.includes('model') || message.includes('no longer available'))
+  );
+};
+
+const classifyGeminiError = (error: any): AiCallOutcome => {
+  if (isGeminiBillingOrProjectRestriction(error)) return 'billing_or_project_restricted';
+  if (isGeminiRateLimitError(error)) return 'rate_limited';
+
+  const message = String(error?.message || error || '').toLowerCase();
+  if (
+    message.includes('503') ||
+    message.includes('500') ||
+    message.includes('xhr error') ||
+    message.includes('fetch failed') ||
+    message.includes('network')
+  ) {
+    return 'retryable_error';
+  }
+
+  return 'failed';
+};
+
+const withRetry = async <T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  onRetry?: (attempt: number, delay: number) => void,
+  meter?: { purpose: AiCallPurpose; model: string }
+): Promise<T> => {
   let lastError: any;
   for (let i = 0; i < maxRetries; i++) {
     try {
-      return await fn();
+      if (meter) recordAiAttempt(meter.purpose, meter.model);
+      const result = await fn();
+      if (meter) recordAiOutcome('succeeded');
+      return result;
     } catch (error: any) {
       lastError = error;
-      // Check if it's a 429 (Rate Limit), 503 (Service Unavailable), 500 (Internal Error), or XHR/Network error
-      const isRetryable = error?.message?.includes('429') || 
-                          error?.message?.includes('RESOURCE_EXHAUSTED') ||
-                          error?.message?.includes('503') ||
-                          error?.message?.includes('500') ||
-                          error?.message?.includes('xhr error') ||
-                          error?.message?.includes('fetch failed') ||
-                          error?.message?.includes('network');
+      const outcome = classifyGeminiError(error);
+      // Retry only true provider throttles and transient server/network errors.
+      const isRetryable = outcome === 'rate_limited' || outcome === 'retryable_error';
+      if (meter) {
+        recordAiOutcome(outcome, {
+          purpose: meter.purpose,
+          model: meter.model,
+          error,
+        });
+      }
       
       if (isRetryable && i < maxRetries - 1) {
         const delay = Math.pow(2, i) * 3000 + Math.random() * 1000;
@@ -292,12 +371,14 @@ const runParsePass = async (
   cleanedHtml: string,
   systemInstruction: string,
   model: string,
+  purpose: AiCallPurpose,
   onRetry?: (attempt: number, delay: number) => void
 ): Promise<ParsedDiaryEntry[] | null> => {
   const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
+  const liveModel = resolveGeminiModel(model, DEFAULT_PARSING_MODEL);
   try {
     const response = await withRetry(() => ai.models.generateContent({
-      model,
+      model: liveModel,
       contents: [{ parts: [{ text: diaryParseUserPrompt(cleanedHtml) }] }],
       config: {
         systemInstruction,
@@ -305,7 +386,7 @@ const runParsePass = async (
         responseMimeType: "application/json",
         responseSchema: DIARY_RESPONSE_SCHEMA,
       },
-    }), 3, onRetry);
+    }), 3, onRetry, { purpose, model: liveModel });
 
     let jsonStr = response.text?.trim();
     if (!jsonStr) return null;
@@ -319,7 +400,14 @@ const runParsePass = async (
       parsed = parsed?.entries && Array.isArray(parsed.entries) ? parsed.entries : [parsed];
     }
     return parsed as ParsedDiaryEntry[];
-  } catch {
+  } catch (error: any) {
+    // A configuration failure is not a parse miss. Returning null here would
+    // render as "no parsed entries available" and hide an outage that affects
+    // every page, so it is rethrown for the caller to surface.
+    if (isGeminiModelUnavailableError(error)) {
+      throw new GeminiModelUnavailableError(liveModel, String(error?.message || error));
+    }
+    console.warn(`Gemini parse pass failed (${purpose}):`, error);
     return null;
   }
 };
@@ -328,7 +416,7 @@ const runParsePass = async (
 
 export const parseDiaryHTML = async (
   html: string,
-  model: string = 'gemini-2.5-flash',
+  model: string = DEFAULT_PARSING_MODEL,
   onRetry?: (attempt: number, delay: number) => void,
   templateVersion?: TemplateVersion
 ): Promise<ParsedPageContent | null> => {
@@ -337,7 +425,7 @@ export const parseDiaryHTML = async (
 
   console.log(`Sending request to Gemini (${model}) — Pass 1, payload: ${cleanedHtml.length} chars`);
   console.time('geminiAPI_parseDiaryHTML_pass1');
-  const pass1 = await runParsePass(cleanedHtml, DIARY_PARSE_TABLE_SYSTEM_INSTRUCTION, model, onRetry);
+  const pass1 = await runParsePass(cleanedHtml, DIARY_PARSE_TABLE_SYSTEM_INSTRUCTION, model, 'gemini:parse:pass1', onRetry);
   console.timeEnd('geminiAPI_parseDiaryHTML_pass1');
 
   if (pass1 && passOneQualityCheck(pass1, readableLength)) {
@@ -348,7 +436,7 @@ export const parseDiaryHTML = async (
   if (templateVersion === 'legacy-ai') {
     console.log(`Pass 1 quality check failed (coverage threshold or missing diaryText). Running Pass 2 (semantic)...`);
     console.time('geminiAPI_parseDiaryHTML_pass2');
-    const pass2 = await runParsePass(cleanedHtml, DIARY_PARSE_SEMANTIC_SYSTEM_INSTRUCTION, model, onRetry);
+    const pass2 = await runParsePass(cleanedHtml, DIARY_PARSE_SEMANTIC_SYSTEM_INSTRUCTION, model, 'gemini:parse:pass2', onRetry);
     console.timeEnd('geminiAPI_parseDiaryHTML_pass2');
     if (pass2 && pass2.length > 0) {
       return annotateSequenceWarnings(pass2.map((entry) => ({ ...entry, parseWarnings: validateParsedEntry(entry) })));
@@ -361,46 +449,6 @@ export const parseDiaryHTML = async (
     : null;
 };
 
-export const draftFieldFeedback = async (
-  fieldName: string,
-  fieldValue: any,
-  studentName: string,
-  config?: {
-    model?: string;
-    tone?: string;
-    customInstruction?: string;
-    itemCountHint?: string;
-    priorFeedbackContext?: string;
-    onRetry?: (attempt: number, delay: number) => void;
-  }
-): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
-  const tone = config?.tone || "professional and encouraging";
-  const customInstruction = config?.customInstruction || "Use the stored default instruction for this field.";
-  const systemInstruction = fieldFeedbackSystemInstruction(
-    studentName, tone, customInstruction,
-    config?.itemCountHint,
-    config?.priorFeedbackContext
-  );
-  const prompt = fieldFeedbackUserPrompt(fieldName, fieldValue, customInstruction, studentName);
-
-  try {
-    const response = await withRetry(() => ai.models.generateContent({
-      model: config?.model || 'gemini-2.5-flash-lite',
-      contents: [{ parts: [{ text: prompt }] }],
-      config: {
-        systemInstruction,
-        temperature: 0.7,
-      }
-    }), 3, config?.onRetry);
-
-    return response.text || "No feedback drafted.";
-  } catch (error) {
-    console.error("Gemini drafting error:", error);
-    return "Drafting failed.";
-  }
-};
-
 export const analyzeEntry = async (
   entry: JournalEntry, 
   template: AnalysisTemplate = 'holistic',
@@ -411,14 +459,14 @@ export const analyzeEntry = async (
   
   try {
     const response = await withRetry(() => ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: DEFAULT_PARSING_MODEL,
       contents: [{ parts: [{ text: entryAnalysisUserPrompt(template, entry) }] }],
       config: {
         systemInstruction: ENTRY_ANALYSIS_SYSTEM_INSTRUCTION,
         temperature: 0.7,
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
       }
-    }), 3, onRetry);
+    }), 3, onRetry, { purpose: 'gemini:analysis', model: DEFAULT_PARSING_MODEL });
 
     return response.text || "No analysis generated.";
   } catch (error) {

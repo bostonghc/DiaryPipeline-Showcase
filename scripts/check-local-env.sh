@@ -43,6 +43,10 @@ fi
 
 if [[ -f "$PROJECT_ROOT/.env.local" ]]; then
   echo ".env.local present"
+  # Presence of the variable name only; never print values.
+  if ! grep -q -E '^[[:space:]]*(export[[:space:]]+)?BROWSER_GEMINI_API_KEY=' "$PROJECT_ROOT/.env.local"; then
+    echo "[warning] BROWSER_GEMINI_API_KEY is not set in .env.local (local browser parsing will be unavailable)"
+  fi
 else
   echo ".env.local missing"
 fi

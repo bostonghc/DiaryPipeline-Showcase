@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isFirestoreQuotaError } from './firestoreErrors';
+import { describeFirestoreError, isFirestoreQuotaError } from './firestoreErrors';
 
 // The exact message surfaced when the resume sync hit the cap (sanitized).
 const REAL_QUOTA_MESSAGE =
@@ -7,7 +7,7 @@ const REAL_QUOTA_MESSAGE =
   "project to avoid quota checks. Cause - Quota exceeded for quota metric 'Free daily read " +
   "units per project (free tier database)' and limit 'Free daily read units per project " +
   "(free tier database) per day' of service 'firestore.googleapis.com' for consumer " +
-  "'project_number:469723776871'. This database cannot exceed free quota limits even when a " +
+  "'project_number:123456789012'. This database cannot exceed free quota limits even when a " +
   "billing instrument is enabled.";
 
 describe('isFirestoreQuotaError', () => {
@@ -37,5 +37,16 @@ describe('isFirestoreQuotaError', () => {
     expect(isFirestoreQuotaError(new Error('Network request failed'))).toBe(false);
     expect(isFirestoreQuotaError(null)).toBe(false);
     expect(isFirestoreQuotaError(undefined)).toBe(false);
+  });
+});
+
+describe('describeFirestoreError', () => {
+  it('points a rules rejection at the rules deployment', () => {
+    expect(describeFirestoreError({ code: 'permission-denied', message: 'Missing or insufficient permissions.' })).toMatch(/firestore\.rules/);
+  });
+
+  it('names quota exhaustion and falls back to the message', () => {
+    expect(describeFirestoreError({ code: 'resource-exhausted' })).toMatch(/quota/i);
+    expect(describeFirestoreError(new Error('offline'))).toBe('offline');
   });
 });

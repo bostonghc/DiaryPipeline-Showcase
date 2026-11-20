@@ -1,21 +1,24 @@
 cff-version: 1.2.0
 message: "If you use or adapt this software, please cite it as below."
 type: software
-title: "DiaryPipeline: a Microsoft Graph pipeline for collecting, reviewing and giving feedback on OneNote student diaries"
+title: "DiaryPipeline (Notebook Feedback Studio): collecting OneNote diaries and reviewing human-written feedback"
 abstract: >-
-  A teacher-facing web application that reads student diaries from OneNote
-  Class Notebooks through the Microsoft Graph API, parses them into structured
-  entries (deterministic or AI-assisted), stores reviewable snapshots in
-  Firestore, and delivers teacher-approved feedback through Microsoft Teams,
-  with export to CSV, XLSX and JSON.
+  A teacher-facing research prototype that reads student diaries from OneNote
+  Class Notebooks through Microsoft Graph, parses structured entries and stores
+  reviewable snapshots in Firestore. Teachers and interns write feedback; a
+  server-side AI reviewer comments on their drafts, with explicit per-comment
+  Apply and recorded inputs and outcomes. Human-authored messages are delivered
+  through Microsoft Teams or email and retained for inspection and export.
+  This release candidate contains the implementation; owner evaluation and
+  wider AI-review pilot enablement remain pending.
 authors:
   - family-names: Carr
     given-names: Geoffrey
     affiliation: "Asahikawa City University"
     orcid: "https://orcid.org/0009-0002-9829-8986"
-version: 1.0.0
+version: 1.1.0-rc.1
 doi: 10.5281/zenodo.23281910
-date-released: 2026-10-10
+# Set the final version and actual date-released immediately before tagging v1.1.0.
 license: MIT
 repository-code: "https://github.com/bostonghc/DiaryPipeline-Showcase"
 keywords:
