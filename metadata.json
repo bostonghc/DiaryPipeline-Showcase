@@ -1,5 +1,5 @@
 {
-  "name": "OneNote Class Notebook Journal Exporter 2",
-  "description": "Extracts and analyzes student journal entries from OneNote Class Notebooks using Microsoft Graph and Gemini AI. Parses 3x3 table structures and exports to CSV, XLSX, or JSON.",
+  "name": "Notebook Feedback Studio",
+  "description": "Teacher-facing app of the DiaryPipeline research project: reads student work from OneNote Class Notebooks through Microsoft Graph, parses diary entries (label-first, with optional AI), keeps a reviewable record in Firestore, and delivers teacher-approved feedback through Microsoft Teams.",
   "requestFramePermissions": []
 }

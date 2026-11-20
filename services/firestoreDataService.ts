@@ -1,6 +1,8 @@
 import {
   Firestore,
   collection,
+  deleteField,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -29,8 +31,10 @@ import {
   TemplateVersion,
   UserPreferences,
 } from '../types';
-import { dominantYear, parseEntryDate, parseEntryWeek } from './diaryChronology';
+import { sortDiaryEntries } from './diaryChronology';
 import { recordRead } from './readMeter';
+import { loadClassCollection, type ClassLoadMode } from './incrementalClassQuery';
+import { isGeminiAvailable, VALID_GEMINI_MODEL_IDS } from './geminiModels';
 
 export const DEFAULT_PARSER_MODE: ParserMode = 'ai';
 export const DEFAULT_TEMPLATE_VERSION: TemplateVersion = 'legacy-ai';
@@ -158,23 +162,7 @@ export const collapseHydratedPageEntries = (entries: HydratedPageEntry[]): Hydra
   });
 
   const deduped = Array.from(bySlot.values());
-  const fallbackYear = dominantYear(deduped.map((entry) => entry.storedEntry.date));
-
-  return deduped.sort((a, b) => {
-    // Sort chronologically. `date` is a human-readable string (e.g. "April 24, 2020"),
-    // so a lexicographic localeCompare would order by month name alphabetically and
-    // scramble a full-year page. Parse to a real timestamp instead (filling in the
-    // page's dominant year for year-less dates), and compare weekNumber numerically.
-    // Entries whose date is unparseable fall to the end and are then ordered by week,
-    // preserving a stable, sensible order.
-    const dateA = parseEntryDate(a.storedEntry.date, fallbackYear);
-    const dateB = parseEntryDate(b.storedEntry.date, fallbackYear);
-    if (dateA !== dateB) return dateA - dateB;
-    const weekA = parseEntryWeek(a.storedEntry.weekNumber);
-    const weekB = parseEntryWeek(b.storedEntry.weekNumber);
-    if (weekA !== weekB) return weekA - weekB;
-    return a.storedEntry.entryId.localeCompare(b.storedEntry.entryId);
-  });
+  return sortDiaryEntries(deduped, entry => entry.storedEntry);
 };
 
 type StoredEntryWire = {
@@ -215,6 +203,7 @@ type StoredEntryWire = {
 type PageSyncWire = {
   pageId: string;
   classId: string;
+  recordKind?: 'page' | 'section_error';
   pageTitle?: string;
   studentName?: string;
   diaryGroupId?: string;
@@ -230,6 +219,9 @@ type PageSyncWire = {
   lastViewedAt?: string;
   lastError?: string;
   nextRetryAt?: string;
+  orphanedAt?: string;
+  contentHash?: string;
+  lastReadAt?: string;
   updatedAt: string;
 };
 
@@ -309,6 +301,7 @@ const hydrateClassStudentIdentity = (data: ClassStudentIdentityWire): ClassStude
 export const hydratePageSyncRecord = (data: PageSyncWire): PageSyncRecord => ({
   pageId: String(data.pageId || ''),
   classId: String(data.classId || ''),
+  recordKind: data.recordKind || (String(data.pageId || '').startsWith('error-') ? 'section_error' : 'page'),
   pageTitle: String(data.pageTitle || ''),
   studentName: String(data.studentName || 'Unknown Student'),
   diaryGroupId: data.diaryGroupId ? String(data.diaryGroupId) : undefined,
@@ -326,15 +319,35 @@ export const hydratePageSyncRecord = (data: PageSyncWire): PageSyncRecord => ({
   lastViewedAt: data.lastViewedAt,
   lastError: data.lastError,
   nextRetryAt: data.nextRetryAt,
+  orphanedAt: data.orphanedAt,
+  contentHash: data.contentHash,
+  lastReadAt: data.lastReadAt,
   updatedAt: String(data.updatedAt || new Date().toISOString()),
 });
 
+/**
+ * The parser settings a class actually runs with. Settings are saved per user,
+ * so a new user's class starts from DEFAULT_PARSER_MODE ('ai'). Without a Gemini
+ * key — the hosted pilot — AI cannot run, so every class uses label-first,
+ * including classes already saved as 'ai'. (2026-10-07: an intern's first
+ * hosted sign-in showed "Missing Gemini API key" on every page.) A stored
+ * template version is kept only when it belongs to the mode that runs.
+ */
+export const resolveClassParserConfig = (
+  cls: Pick<EducationClass, 'parserMode' | 'templateVersion'> | undefined,
+  geminiAvailable: boolean = isGeminiAvailable()
+): { parserMode: ParserMode; templateVersion: TemplateVersion } => {
+  const savedMode = cls?.parserMode || DEFAULT_PARSER_MODE;
+  const parserMode: ParserMode = geminiAvailable ? savedMode : 'label-first';
+  const templateVersion =
+    (savedMode === parserMode && cls?.templateVersion) ||
+    (parserMode === 'label-first' ? LABEL_TEMPLATE_VERSION : DEFAULT_TEMPLATE_VERSION);
+  return { parserMode, templateVersion };
+};
+
 export const withClassDefaults = (cls: EducationClass): EducationClass => ({
   ...cls,
-  parserMode: cls.parserMode || DEFAULT_PARSER_MODE,
-  templateVersion:
-    cls.templateVersion ||
-    (cls.parserMode === 'label-first' ? LABEL_TEMPLATE_VERSION : DEFAULT_TEMPLATE_VERSION),
+  ...resolveClassParserConfig(cls),
 });
 
 export const mergeClassMetadata = (
@@ -343,6 +356,7 @@ export const mergeClassMetadata = (
 ): EducationClass[] =>
   classes.map((cls) => withClassDefaults({ ...cls, ...(metadata[cls.id] || {}) }));
 
+// Decoder twin: services/storedEntryWire.ts decodes the same wire format for the server. Keep the two in sync.
 export const hydrateStoredEntry = (data: StoredEntryWire): HydratedPageEntry => {
   const peerFeedback = parseJson(data.peerFeedback, []);
   const translations = parseJson(data.translations, []);
@@ -410,7 +424,7 @@ export const hydrateStoredEntry = (data: StoredEntryWire): HydratedPageEntry => 
 
 // Graph API page IDs use '!' as a separator (e.g. 1-{notebookId}!1-{pageId}).
 // '!' is disallowed in Firestore document ID paths by the security rules regex.
-const sanitizeFirestoreId = (id: string) => id.replace(/!/g, '__');
+export const sanitizeFirestoreId = (id: string) => id.replace(/!/g, '__');
 
 export const buildStoredEntry = ({
   entry,
@@ -482,7 +496,7 @@ export const buildStoredEntry = ({
   };
 };
 
-const serializeStoredEntry = (entry: StoredDiaryEntry): StoredEntryWire =>
+export const serializeStoredEntry = (entry: StoredDiaryEntry): StoredEntryWire =>
   stripUndefined({
     entryId: entry.entryId,
     pageId: entry.pageId,
@@ -522,6 +536,7 @@ const serializePageSyncRecord = (record: PageSyncRecord): PageSyncWire =>
   stripUndefined({
     pageId: record.pageId,
     classId: record.classId,
+    recordKind: record.recordKind,
     pageTitle: record.pageTitle,
     studentName: record.studentName,
     diaryGroupId: record.diaryGroupId,
@@ -537,6 +552,9 @@ const serializePageSyncRecord = (record: PageSyncRecord): PageSyncWire =>
     lastViewedAt: record.lastViewedAt,
     lastError: record.lastError,
     nextRetryAt: record.nextRetryAt,
+    orphanedAt: record.orphanedAt,
+    contentHash: record.contentHash,
+    lastReadAt: record.lastReadAt,
     updatedAt: record.updatedAt,
   });
 
@@ -564,6 +582,20 @@ export const fetchEntriesForPage = async (
   return collapseHydratedPageEntries(hydrated);
 };
 
+/**
+ * Every stored entry document for a page, without collapsing duplicates: sync
+ * needs each document's own review state, keyed by its own entry ID.
+ */
+export const listStoredEntriesForPage = async (
+  db: Firestore,
+  uid: string,
+  pageId: string
+): Promise<StoredDiaryEntry[]> => {
+  const snapshot = await getDocs(query(collection(db, 'users', uid, 'entries'), where('pageId', '==', pageId)));
+  recordRead('entries:page-review-state', snapshot.size);
+  return snapshot.docs.map((entryDoc) => hydrateStoredEntry(entryDoc.data() as StoredEntryWire).storedEntry);
+};
+
 export const saveEntryRecord = async (db: Firestore, uid: string, entry: StoredDiaryEntry): Promise<void> => {
   const entryRef = doc(db, 'users', uid, 'entries', entry.entryId);
   await setDoc(entryRef, serializeStoredEntry(entry), { merge: true });
@@ -585,7 +617,41 @@ export const savePageSyncRecord = async (
   uid: string,
   record: PageSyncRecord
 ): Promise<void> => {
-  await setDoc(doc(db, 'users', uid, 'pages', record.pageId), serializePageSyncRecord(record), { merge: true });
+  // The write merges, so a field left out keeps its old value. lastError and
+  // nextRetryAt describe the latest attempt only: delete them when absent, or
+  // an error from months ago keeps showing beside a successful sync.
+  await setDoc(
+    doc(db, 'users', uid, 'pages', record.pageId),
+    {
+      ...serializePageSyncRecord(record),
+      ...(record.lastError === undefined ? { lastError: deleteField() } : {}),
+      ...(record.nextRetryAt === undefined ? { nextRetryAt: deleteField() } : {}),
+    },
+    { merge: true }
+  );
+  invalidatePageRecordCache();
+};
+
+export const deletePageSyncRecord = async (
+  db: Firestore,
+  uid: string,
+  pageId: string
+): Promise<void> => {
+  await deleteDoc(doc(db, 'users', uid, 'pages', pageId));
+  invalidatePageRecordCache();
+};
+
+export const setPageSyncRecordOrphanedAt = async (
+  db: Firestore,
+  uid: string,
+  pageId: string,
+  orphanedAt?: string
+): Promise<void> => {
+  await updateDoc(doc(db, 'users', uid, 'pages', pageId), {
+    orphanedAt: orphanedAt ?? deleteField(),
+    updatedAt: new Date().toISOString(),
+  });
+  invalidatePageRecordCache();
 };
 
 // Write an append-only record of a feedback message that was actually sent to a student.
@@ -600,6 +666,40 @@ export const saveFeedbackHistoryRecord = async (
     doc(db, 'users', uid, 'feedbackHistory', record.feedbackId),
     sanitizeFeedbackHistoryWire(record)
   );
+};
+
+/**
+ * Remove undefined values, recursively.
+ *
+ * Firestore rejects an explicit `undefined` anywhere in a document, and the
+ * whole write fails. The top-level fields below are guarded individually, but
+ * nested objects were passed through whole — so a `structuredFeedback` carrying
+ * `priorExcerpt: undefined` (set explicitly when prior-feedback mode is off)
+ * rejected the entire record *after* the message had already been sent to the
+ * student, leaving no history, no author, and the entry still queued as unsent.
+ *
+ * Undefined means "absent" here, never a value worth storing, so dropping the
+ * key is the faithful representation rather than a workaround.
+ */
+const pruneUndefined = <T>(value: T): T => {
+  if (Array.isArray(value)) {
+    // Elements too, not just properties: mapping alone leaves an undefined
+    // element in place, and Firestore rejects it exactly as it rejects an
+    // undefined field. A hole anywhere in vocabItems/peerFeedback/translations
+    // would fail the whole write after the message had already been sent.
+    return value
+      .filter((item) => item !== undefined)
+      .map((item) => pruneUndefined(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (item === undefined) continue;
+      out[key] = pruneUndefined(item);
+    }
+    return out as T;
+  }
+  return value;
 };
 
 export const sanitizeFeedbackHistoryWire = (record: FeedbackHistoryRecord) => {
@@ -625,10 +725,10 @@ export const sanitizeFeedbackHistoryWire = (record: FeedbackHistoryRecord) => {
     wire.batchId = record.batchId;
   }
   if (record.structuredFeedback) {
-    wire.structuredFeedback = record.structuredFeedback;
+    wire.structuredFeedback = pruneUndefined(record.structuredFeedback);
   }
   if (record.entrySnapshot) {
-    wire.entrySnapshot = record.entrySnapshot;
+    wire.entrySnapshot = pruneUndefined(record.entrySnapshot);
   }
   if (record.itemCountSetting) {
     wire.itemCountSetting = record.itemCountSetting;
@@ -638,6 +738,26 @@ export const sanitizeFeedbackHistoryWire = (record: FeedbackHistoryRecord) => {
   }
   if (record.recipientResolutionSource) {
     wire.recipientResolutionSource = record.recipientResolutionSource;
+  }
+  if (record.aiReviewIds && record.aiReviewIds.length > 0) {
+    wire.aiReviewIds = record.aiReviewIds.slice(0, 20);
+  }
+  if (Number.isInteger(record.aiReviewIdsOmitted) && (record.aiReviewIdsOmitted as number) >= 0) {
+    wire.aiReviewIdsOmitted = record.aiReviewIdsOmitted;
+  }
+  // Provenance. Written only when known: a record with no author is honestly
+  // unattributed, which is preferable to a record that appears attributed.
+  if (record.authorUpn) {
+    wire.authorUpn = record.authorUpn;
+  }
+  if (record.authorName) {
+    wire.authorName = record.authorName;
+  }
+  if (record.authorRole) {
+    wire.authorRole = record.authorRole;
+  }
+  if (record.authorFirebaseUid) {
+    wire.authorFirebaseUid = record.authorFirebaseUid;
   }
   return wire;
 };
@@ -665,8 +785,22 @@ export const hydrateFeedbackHistoryRecord = (data: any): FeedbackHistoryRecord =
   // default to 1 on read. structuredFeedback and entrySnapshot are
   // intentionally absent on legacy records — consumers must handle that.
   formatVersion: typeof data.formatVersion === 'number' ? data.formatVersion : 1,
+  // Records written before provenance existed carry no author. They stay
+  // undefined rather than defaulting to the reader, who is very often not the
+  // person who sent them.
+  authorUpn: data.authorUpn ? String(data.authorUpn) : undefined,
+  authorName: data.authorName ? String(data.authorName) : undefined,
+  authorRole: ['owner', 'lead', 'intern'].includes(data.authorRole) ? data.authorRole : undefined,
+  authorFirebaseUid: data.authorFirebaseUid ? String(data.authorFirebaseUid) : undefined,
   structuredFeedback: data.structuredFeedback || undefined,
   entrySnapshot: data.entrySnapshot || undefined,
+  aiReviewIds: Array.isArray(data.aiReviewIds) && data.aiReviewIds.length > 0
+    ? data.aiReviewIds.map((id: unknown) => String(id)).slice(0, 20)
+    : undefined,
+  // Older records predate the field: they excluded nothing, so default to 0.
+  aiReviewIdsOmitted: Number.isInteger(data.aiReviewIdsOmitted) && data.aiReviewIdsOmitted >= 0
+    ? data.aiReviewIdsOmitted
+    : 0,
   uptakeObservedAt: data.uptakeObservedAt ? String(data.uptakeObservedAt) : null,
   itemCountSetting: ['1-2', '3-4', '5+'].includes(data.itemCountSetting)
     ? data.itemCountSetting
@@ -829,25 +963,67 @@ export const listFeedbackHistoryForClasses = async (
     });
 };
 
+// Page-record read cache.
+//
+// Four independent subsystems read the same page records (tree badges, archive
+// status, class dashboard, export, sync finalize). A 2026-08 read audit flagged
+// the redundancy but deferred it as "low volume"; that premise expired once
+// multi-class sync landed — one 28-minute session logged 9,463 reads from this
+// call alone. Rather than merging those subsystems (which the audit deliberately
+// kept separate), identical concurrent and near-consecutive reads share a
+// result. Any write to a page record clears the cache, so a stale badge cannot
+// outlive the change that invalidates it.
+const PAGE_RECORD_CACHE_TTL_MS = 10000;
+
+interface PageRecordCacheEntry {
+  at: number;
+  promise: Promise<PageSyncRecord[]>;
+}
+
+const pageRecordCache = new Map<string, PageRecordCacheEntry>();
+
+/** Clear cached page-record reads. Called by every page-record write path. */
+export const invalidatePageRecordCache = (): void => {
+  pageRecordCache.clear();
+};
+
 export const listPageSyncRecordsForClasses = async (
   db: Firestore,
   uid: string,
-  classIds: string[]
+  classIds: string[],
+  mode: ClassLoadMode = 'full'
 ): Promise<PageSyncRecord[]> => {
   const uniqueClassIds = Array.from(new Set(classIds)).filter(Boolean);
   if (uniqueClassIds.length === 0) return [];
 
-  const snapshots = await Promise.all(
-    uniqueClassIds.map((classId) =>
-      getDocs(query(collection(db, 'users', uid, 'pages'), where('classId', '==', classId)))
-    )
-  );
-  recordRead('pageRecords:classes', snapshots.reduce((n, s) => n + s.size, 0));
+  const cacheKey = `${uid}|${mode}|${[...uniqueClassIds].sort().join(',')}`;
+  const cached = pageRecordCache.get(cacheKey);
+  // An in-flight read is reused regardless of age: the four subsystems commonly
+  // mount together, and without this each one issues its own identical query.
+  if (cached && Date.now() - cached.at < PAGE_RECORD_CACHE_TTL_MS) {
+    return cached.promise;
+  }
 
-  return snapshots
-    .flatMap((snapshot) =>
-      snapshot.docs.map((pageDoc) => hydratePageSyncRecord(pageDoc.data() as PageSyncWire))
-    )
+  const promise = readPageSyncRecordsForClasses(db, uid, uniqueClassIds, mode);
+  pageRecordCache.set(cacheKey, { at: Date.now(), promise });
+  // A failed read must not be cached, or one transient error is served for the
+  // whole TTL window.
+  promise.catch(() => pageRecordCache.delete(cacheKey));
+  return promise;
+};
+
+const readPageSyncRecordsForClasses = async (
+  db: Firestore,
+  uid: string,
+  uniqueClassIds: string[],
+  mode: ClassLoadMode
+): Promise<PageSyncRecord[]> => {
+  const results = await Promise.all(
+    uniqueClassIds.map((classId) => loadClassCollection(db, uid, 'pages', classId, mode))
+  );
+
+  return results
+    .flatMap((result) => result.docs.map((data) => hydratePageSyncRecord(data as PageSyncWire)))
     .sort((a, b) => {
       if (a.classId !== b.classId) return a.classId.localeCompare(b.classId);
       if ((a.diaryGroupName || '') !== (b.diaryGroupName || '')) {
@@ -942,20 +1118,18 @@ export const replaceClassStudentIdentities = async (
 export const listEntriesForClasses = async (
   db: Firestore,
   uid: string,
-  classIds: string[]
+  classIds: string[],
+  mode: ClassLoadMode = 'full'
 ): Promise<StoredDiaryEntry[]> => {
   const uniqueClassIds = Array.from(new Set(classIds)).filter(Boolean);
   if (uniqueClassIds.length === 0) return [];
 
-  const snapshots = await Promise.all(
-    uniqueClassIds.map((classId) =>
-      getDocs(query(collection(db, 'users', uid, 'entries'), where('classId', '==', classId)))
-    )
+  const results = await Promise.all(
+    uniqueClassIds.map((classId) => loadClassCollection(db, uid, 'entries', classId, mode))
   );
-  recordRead('entries:classes', snapshots.reduce((n, s) => n + s.size, 0));
 
-  const hydrated = snapshots.flatMap((snapshot) =>
-    snapshot.docs.map((entryDoc) => hydrateStoredEntry(entryDoc.data() as StoredEntryWire))
+  const hydrated = results.flatMap((result) =>
+    result.docs.map((data) => hydrateStoredEntry(data as StoredEntryWire))
   );
 
   return collapseHydratedPageEntries(hydrated)
@@ -1025,7 +1199,7 @@ export const saveClassLastSynced = async (
 const preferencesRef = (db: Firestore, uid: string) =>
   doc(db, 'users', uid, 'preferences', 'global');
 
-const VALID_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3-flash'];
+const VALID_GEMINI_MODELS = VALID_GEMINI_MODEL_IDS;
 
 export const loadUserPreferences = async (
   db: Firestore,
@@ -1059,13 +1233,52 @@ export const loadUserPreferences = async (
     } as typeof prefs.aiPrompts;
   }
 
+  if (data.reviewFocus && typeof data.reviewFocus === 'object') {
+    prefs.reviewFocus = pickReviewFocus(data.reviewFocus);
+  }
+  if (data.reviewFocusVersion === 1) prefs.reviewFocusVersion = 1;
+
   return prefs;
 };
+
+const REVIEW_FOCUS_KEYS = ['diaryText', 'peerFeedback', 'vocab', 'translations', 'chatbot', 'overall'] as const;
+
+/** Known keys with string values only; anything else in the stored map is dropped. */
+const pickReviewFocus = (value: Record<string, unknown>): NonNullable<UserPreferences['reviewFocus']> => {
+  const out: NonNullable<UserPreferences['reviewFocus']> = {};
+  for (const key of REVIEW_FOCUS_KEYS) {
+    if (typeof value[key] === 'string') out[key] = value[key] as string;
+  }
+  return out;
+};
+
+export const sanitizeUserPreferencesWire = (prefs: UserPreferences): UserPreferences =>
+  stripUndefined({
+    ffItemCount: prefs.ffItemCount,
+    priorFeedbackMode: prefs.priorFeedbackMode,
+    feedbackTone: prefs.feedbackTone,
+    teacherDisplayName: prefs.teacherDisplayName,
+    customSignOff: prefs.customSignOff,
+    aiModelFeedback: prefs.aiModelFeedback,
+    aiModelParsing: prefs.aiModelParsing,
+    aiPrompts: prefs.aiPrompts
+      ? stripUndefined({
+          diaryText: prefs.aiPrompts.diaryText,
+          peerFeedback: prefs.aiPrompts.peerFeedback,
+          vocab: prefs.aiPrompts.vocab,
+          translations: prefs.aiPrompts.translations,
+          overall: prefs.aiPrompts.overall,
+        })
+      : undefined,
+    reviewFocus: prefs.reviewFocus ? pickReviewFocus(prefs.reviewFocus as Record<string, unknown>) : undefined,
+    reviewFocusVersion: prefs.reviewFocusVersion,
+    exportPresets: prefs.exportPresets,
+  });
 
 export const saveUserPreferences = async (
   db: Firestore,
   uid: string,
   prefs: UserPreferences
 ): Promise<void> => {
-  await setDoc(preferencesRef(db, uid), prefs, { merge: true });
+  await setDoc(preferencesRef(db, uid), sanitizeUserPreferencesWire(prefs), { merge: true });
 };

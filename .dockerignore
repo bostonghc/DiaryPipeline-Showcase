@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+dist
+coverage
+.playwright-mcp
+*.log
+.DS_Store
+.superpowers

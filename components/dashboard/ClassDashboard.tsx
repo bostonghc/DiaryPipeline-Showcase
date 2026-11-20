@@ -10,25 +10,28 @@ import {
   ListChecks,
   Loader2,
   MessageSquare,
+  RefreshCw,
   Send,
   ShieldCheck,
   UserRound,
   X,
 } from 'lucide-react';
 import {
+  isPageRecordDeferredBySectionFailures,
+  isSectionFailureRecord,
+  shouldSkipPageCapture,
+} from '../../services/archiveCaptureStatus';
+import {
   fieldCoverage,
   itemCountDistribution,
   priorFeedbackModeDistribution,
   uptakeRate,
 } from '../../services/dashboardDataService';
+import { parseEntryWeek } from '../../services/diaryChronology';
 import { hasTeacherFeedbackText } from '../../services/feedbackWorkflowService';
-import {
-  listEntriesForClasses,
-  listFeedbackHistoryForClasses,
-  listPageSyncRecordsForClasses,
-} from '../../services/firestoreDataService';
 import type {
   EducationClass,
+  ChatbotFeedback,
   EmailResolutionSource,
   FeedbackChannel,
   FeedbackHistoryRecord,
@@ -41,6 +44,12 @@ import type {
   TemplateVersion,
 } from '../../types';
 import { StructureAuditPanel } from './StructureAuditPanel';
+import { invalidateDashboardDataset, useDashboardDataset } from '../../hooks/useDashboardDataset';
+import { FilterSelect, MetricTile, formatPercent } from './dashboardPrimitives';
+import { PeerFeedbackTab } from './PeerFeedbackTab';
+import { SentFeedbackReviewTab } from './SentFeedbackReviewTab';
+import type { SentFeedbackReviewAccess } from '../../services/sentFeedbackAccess';
+import { buildDashboardTabs, resolveActiveTab, type DashboardTab } from './dashboardTabs';
 
 interface ClassDashboardProps {
   db: Firestore;
@@ -57,9 +66,20 @@ interface ClassDashboardProps {
     studentName?: string;
     lastModified?: string;
   }) => void;
+  onRetryClassCapture?: (classId: string) => void;
+  /** Bumped by App when a sync finishes, so the dashboard picks up new data. */
+  dataVersion?: number;
+  /**
+   * Owner/lead review of others' sent feedback. Hidden when 'not-permitted'
+   * (never available to this person); greyed with the reason when 'signed-out'.
+   */
+  sentFeedbackReview?: SentFeedbackReviewAccess;
+  /** Opens the Microsoft sign-in so an expired session can be restored in place. */
+  onReconnectMicrosoft?: () => void;
+  /** Owner with bound claims: publish intern group assignments for interns' apps. */
+  publishInternAssignments?: boolean;
 }
 
-type DashboardTab = 'review-queue' | 'data-health' | 'teacher-practice' | 'student-trajectories' | 'class-patterns';
 type SortDirection = 'asc' | 'desc';
 type DataHealthSortKey =
   | 'studentName'
@@ -79,25 +99,27 @@ type ClassPatternsSortKey =
   | 'peerFeedbackCount'
   | 'translationCount'
   | 'photoCount';
-type ClassPatternsFieldFilter = 'all' | 'peerFeedback' | 'vocab' | 'translations' | 'photos' | 'chatbot' | 'warnings';
+type ClassPatternsFieldFilter =
+  | 'all'
+  | 'peerFeedback'
+  | 'noPeerFeedback'
+  | 'vocab'
+  | 'noVocab'
+  | 'translations'
+  | 'noTranslations'
+  | 'photos'
+  | 'noPhotos'
+  | 'chatbot'
+  | 'noChatbot'
+  | 'warnings'
+  | 'sentFeedback'
+  | 'notSentFeedback';
 type TrajectoryEventKind = 'entry' | 'feedback';
 
-// Session-scoped read cache for the dashboard's full-corpus fetch. The dashboard
-// pulls every entry, page record, and feedback record for all selected classes on
-// open — its heaviest Firestore read. Without this, closing and reopening (a common
-// review motion) re-reads the whole corpus each time. Cached at module scope (not in
-// component state, which is lost on unmount) keyed by uid + class set, with a short
-// TTL so a reopen after a sync still refreshes. Online one-shot getDocs do not hit the
-// SDK's persistent cache, so this is what actually saves the repeated reads.
-const DASHBOARD_CACHE_TTL_MS = 120_000; // 2 minutes
-type DashboardDataset = {
-  entries: StoredDiaryEntry[];
-  pageRecords: PageSyncRecord[];
-  feedbackRecords: FeedbackHistoryRecord[];
-};
-const dashboardDatasetCache = new Map<string, { fetchedAt: number; data: DashboardDataset }>();
-
 const PAGE_SYNC_STATES: PageSyncState[] = ['saved', 'rate_limited', 'error', 'queued', 'syncing', 'idle'];
+const hasChatbotEvidence = (chatbotFeedback?: ChatbotFeedback): boolean =>
+  Boolean(chatbotFeedback?.present && chatbotFeedback.data.trim().length > 0);
+
 const FEEDBACK_FIELDS = [
   { key: 'diaryText', label: 'Diary text' },
   { key: 'peerFeedback', label: 'Peer feedback' },
@@ -110,9 +132,6 @@ const ITEM_COUNT_SETTINGS: Array<FFItemCount | 'unknown'> = ['1-2', '3-4', '5+',
 const PRIOR_FEEDBACK_MODES: Array<PriorFeedbackMode | 'unknown'> = ['off', 'reference', 'include', 'unknown'];
 const FEEDBACK_CHANNELS: FeedbackChannel[] = ['email', 'teams'];
 const RECIPIENT_RESOLUTION_SOURCES: Array<EmailResolutionSource | 'unknown'> = ['roster', 'graph_search', 'manual', 'unknown'];
-
-const formatPercent = (count: number, total: number): string =>
-  total === 0 ? '0%' : `${Math.round((count / total) * 100)}%`;
 
 const formatTimestamp = (value?: string): string => {
   if (!value) return 'Not captured';
@@ -181,69 +200,19 @@ export const ClassDashboard: React.FC<ClassDashboardProps> = ({
   embedded = false,
   accessToken,
   onOpenPage,
+  onRetryClassCapture,
+  dataVersion = 0,
+  sentFeedbackReview = 'not-permitted',
+  onReconnectMicrosoft,
+  publishInternAssignments = false,
 }) => {
-  const [activeTab, setActiveTab] = useState<DashboardTab>('review-queue');
-  const [entries, setEntries] = useState<StoredDiaryEntry[]>([]);
-  const [pageRecords, setPageRecords] = useState<PageSyncRecord[]>([]);
-  const [feedbackRecords, setFeedbackRecords] = useState<FeedbackHistoryRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  // Stabilise the effect key: Array.from(selectedNotebookIds) creates a new
-  // reference on every App.tsx render, which would re-query Firestore on every
-  // sync-progress tick while the dashboard is open.
-  const classIdsKey = useMemo(
-    () => JSON.stringify([...selectedClassIds].sort()),
-    [selectedClassIds]
+  const [selectedTab, setSelectedTab] = useState<DashboardTab>('review-queue');
+  const { entries, pageRecords, feedbackRecords, loadedAt, loading, error, reload } = useDashboardDataset(
+    db,
+    uid,
+    selectedClassIds,
+    dataVersion
   );
-
-  useEffect(() => {
-    const ids = JSON.parse(classIdsKey) as string[];
-    let cancelled = false;
-
-    // Serve from the session cache when fresh, so closing and reopening the
-    // dashboard within the TTL does not re-read the whole corpus.
-    const cacheKey = `${uid}|${classIdsKey}`;
-    const cached = dashboardDatasetCache.get(cacheKey);
-    if (cached && Date.now() - cached.fetchedAt < DASHBOARD_CACHE_TTL_MS) {
-      setEntries(cached.data.entries);
-      setPageRecords(cached.data.pageRecords);
-      setFeedbackRecords(cached.data.feedbackRecords);
-      setError(null);
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    Promise.all([
-      listEntriesForClasses(db, uid, ids),
-      listPageSyncRecordsForClasses(db, uid, ids),
-      listFeedbackHistoryForClasses(db, uid, ids),
-    ])
-      .then(([nextEntries, nextPageRecords, nextFeedbackRecords]) => {
-        dashboardDatasetCache.set(cacheKey, {
-          fetchedAt: Date.now(),
-          data: { entries: nextEntries, pageRecords: nextPageRecords, feedbackRecords: nextFeedbackRecords },
-        });
-        if (cancelled) return;
-        setEntries(nextEntries);
-        setPageRecords(nextPageRecords);
-        setFeedbackRecords(nextFeedbackRecords);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [db, uid, classIdsKey]);
 
   const selectedClasses = useMemo(
     () => selectedClassIds.map((id) => classes.find((cls) => cls.id === id)).filter(Boolean) as EducationClass[],
@@ -302,13 +271,10 @@ export const ClassDashboard: React.FC<ClassDashboardProps> = ({
     };
   }, [entries, pageRecords]);
 
-  const tabs: Array<{ id: DashboardTab; label: string; disabled?: boolean }> = [
-    { id: 'review-queue', label: 'Review Queue' },
-    { id: 'data-health', label: 'Data Health' },
-    { id: 'teacher-practice', label: 'Teacher Practice' },
-    { id: 'student-trajectories', label: 'Student Trajectories' },
-    { id: 'class-patterns', label: 'Class Patterns' },
-  ];
+  const tabs = buildDashboardTabs(sentFeedbackReview);
+  // Only a tab that is gone altogether (sign-out, role change) falls back; one that
+  // is merely unavailable stays selected so its pane can say why.
+  const activeTab = resolveActiveTab(selectedTab, tabs);
 
   const frameClassName = embedded
     ? 'flex h-full min-h-0 w-full flex-col overflow-hidden bg-white'
@@ -335,30 +301,58 @@ export const ClassDashboard: React.FC<ClassDashboardProps> = ({
               Read-only observables for selected classes. Counts describe data coverage and workflow state; they are not student scores or diagnostic claims.
             </p>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-white hover:text-slate-700"
-            title="Close dashboard"
-            aria-label="Close dashboard"
-          >
-            <X size={20} />
-          </button>
+          <div className="flex shrink-0 items-center gap-3">
+            {/* Freshness of the saved data shown here. Sync updates it automatically;
+                Reload re-reads everything saved, e.g. after a sync in another tab. */}
+            <div className="text-right text-[11px] font-semibold leading-tight text-slate-400">
+              {loading && loadedAt !== null ? (
+                <span className="inline-flex items-center gap-1">
+                  <Loader2 size={11} className="animate-spin" /> Updating…
+                </span>
+              ) : loadedAt !== null ? (
+                <span title={new Date(loadedAt).toLocaleString()}>
+                  Saved data loaded {new Date(loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              ) : null}
+              {error && loadedAt !== null && <span className="block text-red-600">Update failed: {error}</span>}
+              <button
+                type="button"
+                onClick={reload}
+                disabled={loading}
+                className="mt-0.5 block w-full text-right font-black text-indigo-600 hover:text-indigo-800 disabled:opacity-40"
+                title="Re-read all saved data for the selected classes from the database. Use after a sync in another tab or on another device."
+              >
+                Reload saved data
+              </button>
+            </div>
+            <button
+              onClick={onClose}
+              className="rounded-xl p-2 text-slate-400 transition-colors hover:bg-white hover:text-slate-700"
+              title="Close dashboard"
+              aria-label="Close dashboard"
+            >
+              <X size={20} />
+            </button>
+          </div>
         </header>
 
         <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-slate-200 bg-white px-5 py-2">
           {tabs.map((tab) => (
             <button
               key={tab.id}
-              onClick={() => !tab.disabled && setActiveTab(tab.id)}
+              onClick={() => !tab.disabled && setSelectedTab(tab.id)}
               disabled={tab.disabled}
+              aria-disabled={tab.unavailableReason ? true : undefined}
               className={`shrink-0 rounded-lg px-2.5 py-1.5 text-[11px] font-black uppercase tracking-wider transition-colors ${
-                activeTab === tab.id
+                tab.unavailableReason
+                  ? `cursor-help text-slate-400 ${activeTab === tab.id ? 'bg-slate-100' : 'hover:bg-slate-50'}`
+                  : activeTab === tab.id
                   ? 'bg-indigo-50 text-indigo-700'
                   : tab.disabled
                   ? 'cursor-not-allowed text-slate-300'
                   : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
               }`}
-              title={tab.disabled ? 'Planned for a later dashboard slice' : undefined}
+              title={tab.unavailableReason ?? (tab.disabled ? 'Planned for a later dashboard slice' : undefined)}
             >
               {tab.label}
             </button>
@@ -366,14 +360,14 @@ export const ClassDashboard: React.FC<ClassDashboardProps> = ({
         </div>
 
         <div className="flex-1 overflow-y-auto bg-slate-50/70 px-5 py-3">
-          {loading ? (
+          {loading && loadedAt === null ? (
             <div className="flex h-full items-center justify-center">
               <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm font-bold text-slate-600 shadow-sm">
                 <Loader2 size={18} className="animate-spin text-indigo-500" />
                 Loading saved dashboard records...
               </div>
             </div>
-          ) : error ? (
+          ) : error && loadedAt === null ? (
             <div className="rounded-2xl border border-red-100 bg-white p-5 text-sm font-semibold text-red-700 shadow-sm">
               Dashboard records could not be loaded: {error}
             </div>
@@ -386,12 +380,29 @@ export const ClassDashboard: React.FC<ClassDashboardProps> = ({
               feedbackRecords={feedbackRecords}
               selectedClasses={selectedClasses}
               onOpenPage={onOpenPage}
+              onRetryClassCapture={onRetryClassCapture}
             />
           ) : activeTab === 'student-trajectories' ? (
             <StudentTrajectoriesTab
               entries={entries}
               pageRecords={pageRecords}
               feedbackRecords={feedbackRecords}
+              selectedClasses={selectedClasses}
+            />
+          ) : activeTab === 'sent-review' ? (
+            <SentFeedbackReviewTab
+              db={db}
+              selectedClasses={selectedClasses}
+              access={sentFeedbackReview}
+              onReconnectMicrosoft={onReconnectMicrosoft}
+            />
+          ) : activeTab === 'peer-feedback' ? (
+            <PeerFeedbackTab
+              db={db}
+              uid={uid}
+              publishInternAssignments={publishInternAssignments}
+              entries={entries}
+              pageRecords={pageRecords}
               selectedClasses={selectedClasses}
             />
           ) : activeTab === 'class-patterns' ? (
@@ -429,9 +440,10 @@ interface ReviewQueueTabProps {
   feedbackRecords: FeedbackHistoryRecord[];
   selectedClasses: EducationClass[];
   onOpenPage?: ClassDashboardProps['onOpenPage'];
+  onRetryClassCapture?: ClassDashboardProps['onRetryClassCapture'];
 }
 
-type ReviewQueueKind = 'ready' | 'draft' | 'capture';
+type ReviewQueueKind = 'ready' | 'draft' | 'capture' | 'archived';
 
 interface ReviewQueueRow {
   id: string;
@@ -469,6 +481,7 @@ const ReviewQueueTab: React.FC<ReviewQueueTabProps> = ({
   feedbackRecords,
   selectedClasses,
   onOpenPage,
+  onRetryClassCapture,
 }) => {
   const queue = useMemo(() => {
     const classNameById = Object.fromEntries(
@@ -485,10 +498,19 @@ const ReviewQueueTab: React.FC<ReviewQueueTabProps> = ({
     const readyRows: ReviewQueueRow[] = [];
     const draftRows: ReviewQueueRow[] = [];
     const captureRows: ReviewQueueRow[] = [];
+    const archivedRows: ReviewQueueRow[] = [];
+
+    const sectionFailureRecords = pageRecords.filter(isSectionFailureRecord);
+    const failedSectionIds = new Set(
+      sectionFailureRecords
+        .map((record) => record.diaryGroupId)
+        .filter((sectionId): sectionId is string => Boolean(sectionId))
+    );
 
     entries.forEach((entry) => {
       if (sentEntryIds.has(entry.entryId)) return;
       const pageRecord = pageRecordById[entry.pageId];
+      if (pageRecord?.orphanedAt) return;
       const classDisplayName = classNameById[entry.classId] ?? entry.classId;
       const base = {
         classDisplayName,
@@ -532,8 +554,34 @@ const ReviewQueueTab: React.FC<ReviewQueueTabProps> = ({
     });
 
     pageRecords.forEach((record) => {
+      if (record.orphanedAt) {
+        archivedRows.push({
+          id: `archived-${record.pageId}`,
+          kind: 'archived',
+          classDisplayName: classNameById[record.classId] ?? record.classId,
+          classId: record.classId,
+          studentName: record.studentName || 'Unknown student',
+          pageId: record.pageId,
+          pageTitle: record.pageTitle || 'Untitled page',
+          entryLabel: `${record.entryCount} saved entr${record.entryCount === 1 ? 'y' : 'ies'}`,
+          statusLabel: 'Archived source',
+          detail: 'Saved evidence is retained, but this page ID was not present in current OneNote discovery.',
+          updatedAt: record.orphanedAt,
+          lastModified: record.oneNoteLastModified,
+          priority: 40_000 - parseSortableTime(record.orphanedAt),
+        });
+        return;
+      }
+
       const noSavedEntries = !pageIdsWithEntries.has(record.pageId);
+      const sectionFailure = isSectionFailureRecord(record);
+      const reconciliationDeferred = isPageRecordDeferredBySectionFailures(
+        record,
+        failedSectionIds,
+        sectionFailureRecords.length > 0
+      );
       const isCaptureIssue =
+        sectionFailure ||
         record.syncState === 'error' ||
         record.syncState === 'rate_limited' ||
         (record.syncState === 'saved' && noSavedEntries);
@@ -548,13 +596,21 @@ const ReviewQueueTab: React.FC<ReviewQueueTabProps> = ({
         pageId: record.pageId,
         pageTitle: record.pageTitle || 'Untitled page',
         statusLabel:
-          record.syncState === 'error'
+          sectionFailure
+            ? 'Section unavailable'
+            : reconciliationDeferred
+              ? 'Awaiting section'
+            : record.syncState === 'error'
             ? 'Capture error'
             : record.syncState === 'rate_limited'
               ? 'Rate limited'
               : 'No entries parsed',
         detail:
-          record.syncState === 'saved' && noSavedEntries
+          sectionFailure
+            ? 'This section could not list its pages. Retry the class before reconciling page records.'
+            : reconciliationDeferred
+              ? 'This older page record cannot be classified until its section lists successfully.'
+            : record.syncState === 'saved' && noSavedEntries
             ? 'Page has a sync record but no saved diary entries.'
             : `Page sync state is ${record.syncState.replace('_', ' ')}.`,
         updatedAt: record.updatedAt,
@@ -573,6 +629,7 @@ const ReviewQueueTab: React.FC<ReviewQueueTabProps> = ({
       ready: sortRows(readyRows),
       drafts: sortRows(draftRows),
       capture: sortRows(captureRows),
+      archived: sortRows(archivedRows),
     };
   }, [entries, feedbackRecords, pageRecords, selectedClasses]);
 
@@ -641,6 +698,13 @@ const ReviewQueueTab: React.FC<ReviewQueueTabProps> = ({
         emptyText="No capture issues found for selected classes."
         rows={queue.capture}
         onOpenPage={onOpenPage}
+        onRetryClassCapture={onRetryClassCapture}
+      />
+      <ReviewQueueSection
+        title="Archived source pages"
+        description="Saved evidence retained from page IDs that no longer appear in current OneNote discovery. These records are historical context, not current capture failures."
+        emptyText="No archived source pages found for selected classes."
+        rows={queue.archived}
       />
     </div>
   );
@@ -652,7 +716,8 @@ const ReviewQueueSection: React.FC<{
   emptyText: string;
   rows: ReviewQueueRow[];
   onOpenPage?: ClassDashboardProps['onOpenPage'];
-}> = ({ title, description, emptyText, rows, onOpenPage }) => (
+  onRetryClassCapture?: ClassDashboardProps['onRetryClassCapture'];
+}> = ({ title, description, emptyText, rows, onOpenPage, onRetryClassCapture }) => (
   <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
     <div className="border-b border-slate-100 px-5 py-4">
       <div className="flex items-center justify-between gap-3">
@@ -680,6 +745,8 @@ const ReviewQueueSection: React.FC<{
                     ? 'bg-emerald-50 text-emerald-700'
                     : row.kind === 'capture'
                       ? 'bg-amber-50 text-amber-700'
+                      : row.kind === 'archived'
+                        ? 'bg-slate-100 text-slate-600'
                       : 'bg-indigo-50 text-indigo-700'
                 }`}>
                   {row.statusLabel}
@@ -698,22 +765,38 @@ const ReviewQueueSection: React.FC<{
                 Updated {formatTimestamp(row.updatedAt)}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() =>
-                onOpenPage?.({
-                  pageId: row.pageId,
-                  pageTitle: row.pageTitle,
-                  classId: row.classId,
-                  studentName: row.studentName,
-                  lastModified: row.lastModified,
-                })
-              }
-              disabled={!onOpenPage}
-              className="inline-flex items-center justify-center rounded-lg bg-slate-900 px-3 py-2 text-xs font-black text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
-            >
-              Open page
-            </button>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {row.kind === 'capture' && onRetryClassCapture && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    invalidateDashboardDataset();
+                    onRetryClassCapture(row.classId);
+                  }}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-amber-500 px-3 py-2 text-xs font-black text-white transition-colors hover:bg-amber-600"
+                >
+                  <RefreshCw size={14} /> Retry class capture
+                </button>
+              )}
+              {row.kind !== 'archived' && !shouldSkipPageCapture({ id: row.pageId, displayName: row.pageTitle }) && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpenPage?.({
+                      pageId: row.pageId,
+                      pageTitle: row.pageTitle,
+                      classId: row.classId,
+                      studentName: row.studentName,
+                      lastModified: row.lastModified,
+                    })
+                  }
+                  disabled={!onOpenPage}
+                  className="inline-flex items-center justify-center rounded-lg bg-slate-900 px-3 py-2 text-xs font-black text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                >
+                  Open page
+                </button>
+              )}
+            </div>
           </div>
         ))}
       </div>
@@ -1103,7 +1186,7 @@ const StudentTrajectoriesTab: React.FC<StudentTrajectoriesTabProps> = ({
           <ConditionRow
             label="Date range"
             value={firstEvent && lastEvent ? `${firstEvent.dateLabel} - ${lastEvent.dateLabel}` : 'None'}
-            detail="from entry dates and feedback sentAt timestamps"
+            detail="from entry dates and feedback sent, with timestamps"
           />
           <ConditionRow
             label="Parser/template mix"
@@ -1205,10 +1288,181 @@ interface ClassPatternEvidenceRow {
   photoCount: number;
   chatbotPresent: boolean;
   warningCount: number;
+  sentFeedbackPresent: boolean;
   parserMode: ParserMode;
   templateVersion: TemplateVersion;
   updatedAt: string;
 }
+
+interface ClassPatternFilterAction {
+  classFilter?: string;
+  weekFilter?: string;
+  fieldFilter?: ClassPatternsFieldFilter;
+  sortKey?: ClassPatternsSortKey;
+  sortDirection?: SortDirection;
+}
+
+interface ClassPatternInsight {
+  id: string;
+  title: string;
+  value: string;
+  detail: string;
+  tone: 'slate' | 'amber' | 'emerald' | 'indigo';
+  action: ClassPatternFilterAction;
+}
+
+interface ClassWeekPatternStat {
+  week: string;
+  count: number;
+  peer: number;
+  vocab: number;
+  translations: number;
+  photos: number;
+  chatbot: number;
+  warnings: number;
+  sentFeedback: number;
+}
+
+const CLASS_PATTERN_FIELD_LABELS: Record<ClassPatternsFieldFilter, string> = {
+  all: 'All entries',
+  peerFeedback: 'Peer comments present',
+  noPeerFeedback: 'No peer comments',
+  vocab: 'Vocabulary present',
+  noVocab: 'No vocabulary',
+  translations: 'Translations present',
+  noTranslations: 'No translations',
+  photos: 'Photos present',
+  noPhotos: 'No photos',
+  chatbot: 'Chatbot section present',
+  noChatbot: 'No chatbot section',
+  warnings: 'Parse warnings',
+  sentFeedback: 'Sent feedback',
+  notSentFeedback: 'No sent feedback',
+};
+
+const formatWeekLabel = (week: string): string =>
+  week === 'not captured' ? 'week not captured' : `week ${week}`;
+
+const compareWeekLabels = (a: string, b: string): number => {
+  const weekA = parseEntryWeek(a);
+  const weekB = parseEntryWeek(b);
+  if (weekA !== weekB) return weekA - weekB;
+  return compareValues(a, b);
+};
+
+const rateFor = (count: number, total: number): number =>
+  total === 0 ? 0 : count / total;
+
+const buildClassPatternInsights = (stats: ClassWeekPatternStat[]): ClassPatternInsight[] => {
+  // "week not captured" is a measurement condition, not a week-level class pattern.
+  // Keep those entries visible in the evidence table, but do not let them headline
+  // observed patterns like "lowest peer-response presence".
+  const eligible = stats.filter((stat) => stat.count > 0 && stat.week !== 'not captured');
+  if (eligible.length === 0) return [];
+  const multiEntryWeeks = eligible.filter((stat) => stat.count >= 2);
+  const candidates = multiEntryWeeks.length > 0 ? multiEntryWeeks : eligible;
+
+  const lowestByRate = (metric: keyof Pick<ClassWeekPatternStat, 'peer' | 'vocab' | 'translations'>) =>
+    candidates.reduce<ClassWeekPatternStat | null>((best, stat) => {
+      if (!best) return stat;
+      const statRate = rateFor(stat[metric], stat.count);
+      const bestRate = rateFor(best[metric], best.count);
+      if (statRate !== bestRate) return statRate < bestRate ? stat : best;
+      return stat.count > best.count ? stat : best;
+    }, null);
+
+  const highestByRate = (metric: keyof Pick<ClassWeekPatternStat, 'warnings' | 'chatbot'>) =>
+    candidates.reduce<ClassWeekPatternStat | null>((best, stat) => {
+      if (!best) return stat;
+      const statRate = rateFor(stat[metric], stat.count);
+      const bestRate = rateFor(best[metric], best.count);
+      if (statRate !== bestRate) return statRate > bestRate ? stat : best;
+      return stat[metric] > best[metric] ? stat : best;
+    }, null);
+
+  const largestFeedbackGap = candidates.reduce<ClassWeekPatternStat | null>((best, stat) => {
+    if (!best) return stat;
+    const statGap = stat.count - stat.sentFeedback;
+    const bestGap = best.count - best.sentFeedback;
+    if (statGap !== bestGap) return statGap > bestGap ? stat : best;
+    return stat.count > best.count ? stat : best;
+  }, null);
+
+  const insights: ClassPatternInsight[] = [];
+  const peerLow = lowestByRate('peer');
+  if (peerLow && peerLow.count - peerLow.peer > 0) {
+    insights.push({
+      id: 'lowest-peer-presence',
+      title: `${formatWeekLabel(peerLow.week)} has the lowest peer-response presence`,
+      value: `${formatPercent(peerLow.peer, peerLow.count)} present`,
+      detail: `${peerLow.count - peerLow.peer} of ${peerLow.count} entries have no peer comments.`,
+      tone: 'indigo',
+      action: { weekFilter: peerLow.week, fieldFilter: 'noPeerFeedback', sortKey: 'studentName', sortDirection: 'asc' },
+    });
+  }
+
+  const vocabLow = lowestByRate('vocab');
+  if (vocabLow && vocabLow.count - vocabLow.vocab > 0) {
+    insights.push({
+      id: 'lowest-vocab-presence',
+      title: `${formatWeekLabel(vocabLow.week)} has the lowest vocabulary presence`,
+      value: `${formatPercent(vocabLow.vocab, vocabLow.count)} with vocab`,
+      detail: `${vocabLow.count - vocabLow.vocab} of ${vocabLow.count} entries have no vocabulary items.`,
+      tone: 'slate',
+      action: { weekFilter: vocabLow.week, fieldFilter: 'noVocab', sortKey: 'studentName', sortDirection: 'asc' },
+    });
+  }
+
+  const translationLow = lowestByRate('translations');
+  if (translationLow && translationLow.count - translationLow.translations > 0) {
+    insights.push({
+      id: 'lowest-translation-presence',
+      title: `${formatWeekLabel(translationLow.week)} has the lowest translation-study presence`,
+      value: `${formatPercent(translationLow.translations, translationLow.count)} with translations`,
+      detail: `${translationLow.count - translationLow.translations} of ${translationLow.count} entries have no translation items.`,
+      tone: 'slate',
+      action: { weekFilter: translationLow.week, fieldFilter: 'noTranslations', sortKey: 'studentName', sortDirection: 'asc' },
+    });
+  }
+
+  const warningHigh = highestByRate('warnings');
+  if (warningHigh && warningHigh.warnings > 0) {
+    insights.push({
+      id: 'highest-warning-presence',
+      title: `${formatWeekLabel(warningHigh.week)} has the highest parse-warning concentration`,
+      value: `${formatPercent(warningHigh.warnings, warningHigh.count)} flagged`,
+      detail: `${warningHigh.warnings} of ${warningHigh.count} entries carry parse warnings.`,
+      tone: 'amber',
+      action: { weekFilter: warningHigh.week, fieldFilter: 'warnings', sortKey: 'studentName', sortDirection: 'asc' },
+    });
+  }
+
+  if (largestFeedbackGap && largestFeedbackGap.count - largestFeedbackGap.sentFeedback > 0) {
+    const gap = largestFeedbackGap.count - largestFeedbackGap.sentFeedback;
+    insights.push({
+      id: 'largest-feedback-gap',
+      title: `${formatWeekLabel(largestFeedbackGap.week)} has the largest sent-feedback gap`,
+      value: `${gap} not sent`,
+      detail: `${formatPercent(largestFeedbackGap.sentFeedback, largestFeedbackGap.count)} of entries have sent-feedback records.`,
+      tone: 'emerald',
+      action: { weekFilter: largestFeedbackGap.week, fieldFilter: 'notSentFeedback', sortKey: 'studentName', sortDirection: 'asc' },
+    });
+  }
+
+  const chatbotHigh = highestByRate('chatbot');
+  if (chatbotHigh && chatbotHigh.chatbot > 0 && insights.length < 5) {
+    insights.push({
+      id: 'highest-chatbot-presence',
+      title: `${formatWeekLabel(chatbotHigh.week)} has the strongest chatbot-section presence`,
+      value: `${formatPercent(chatbotHigh.chatbot, chatbotHigh.count)} present`,
+      detail: `${chatbotHigh.chatbot} of ${chatbotHigh.count} entries include chatbot evidence.`,
+      tone: 'indigo',
+      action: { weekFilter: chatbotHigh.week, fieldFilter: 'chatbot', sortKey: 'studentName', sortDirection: 'asc' },
+    });
+  }
+
+  return insights.slice(0, 5);
+};
 
 const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
   entries,
@@ -1237,7 +1491,7 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
   const weeks = useMemo(
     () => {
       const weekLabels = entries.map((entry) => entry.weekNumber || 'not captured');
-      return Array.from(new Set<string>(weekLabels)).sort((a, b) => compareValues(a, b));
+      return Array.from(new Set<string>(weekLabels)).sort(compareWeekLabels);
     },
     [entries]
   );
@@ -1248,6 +1502,10 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
   const templates = useMemo(
     () => Array.from(new Set(entries.map((entry) => entry.templateVersion))).sort(),
     [entries]
+  );
+  const sentEntryIds = useMemo(
+    () => new Set(feedbackRecords.map((record) => record.entryId).filter(Boolean)),
+    [feedbackRecords]
   );
 
   const rows = useMemo<ClassPatternEvidenceRow[]>(() => {
@@ -1265,12 +1523,9 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
         peerFeedbackCount: entry.peerFeedback.length,
         translationCount: entry.translationCount,
         photoCount: entry.photoCount,
-        chatbotPresent: Boolean(
-          entry.chatbotFeedback?.prompt ||
-          entry.chatbotFeedback?.studentResponse ||
-          entry.chatbotFeedback?.aiResponse
-        ),
+        chatbotPresent: hasChatbotEvidence(entry.chatbotFeedback),
         warningCount: (entry.parseWarnings ?? []).length,
+        sentFeedbackPresent: sentEntryIds.has(entry.entryId),
         parserMode: pageRecord?.parserMode ?? entry.parserMode,
         templateVersion: pageRecord?.templateVersion ?? entry.templateVersion,
         updatedAt: entry.updatedAt,
@@ -1282,11 +1537,18 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
       .filter((row) => weekFilter === 'all' || row.weekNumber === weekFilter)
       .filter((row) => {
         if (fieldFilter === 'peerFeedback') return row.peerFeedbackCount > 0;
+        if (fieldFilter === 'noPeerFeedback') return row.peerFeedbackCount === 0;
         if (fieldFilter === 'vocab') return row.vocabCount > 0;
+        if (fieldFilter === 'noVocab') return row.vocabCount === 0;
         if (fieldFilter === 'translations') return row.translationCount > 0;
+        if (fieldFilter === 'noTranslations') return row.translationCount === 0;
         if (fieldFilter === 'photos') return row.photoCount > 0;
+        if (fieldFilter === 'noPhotos') return row.photoCount === 0;
         if (fieldFilter === 'chatbot') return row.chatbotPresent;
+        if (fieldFilter === 'noChatbot') return !row.chatbotPresent;
         if (fieldFilter === 'warnings') return row.warningCount > 0;
+        if (fieldFilter === 'sentFeedback') return row.sentFeedbackPresent;
+        if (fieldFilter === 'notSentFeedback') return !row.sentFeedbackPresent;
         return true;
       })
       .sort((a, b) => {
@@ -1303,7 +1565,7 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
         const result = compareValues(values[sortKey][0], values[sortKey][1]);
         return sortDirection === 'asc' ? result : -result;
       });
-  }, [classFilter, classNameById, entries, fieldFilter, pageRecordById, sortDirection, sortKey, weekFilter]);
+  }, [classFilter, classNameById, entries, fieldFilter, pageRecordById, sentEntryIds, sortDirection, sortKey, weekFilter]);
 
   const entryCountsByWeek = useMemo(
     () => countBy<StoredDiaryEntry>(entries, (entry) => entry.weekNumber || 'not captured'),
@@ -1329,9 +1591,37 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
   const entriesWithVocab = entries.filter((entry) => entry.vocabCount > 0).length;
   const entriesWithTranslations = entries.filter((entry) => entry.translationCount > 0).length;
   const entriesWithPhotos = entries.filter((entry) => entry.photoCount > 0).length;
-  const entriesWithChatbot = entries.filter((entry) =>
-    Boolean(entry.chatbotFeedback?.prompt || entry.chatbotFeedback?.studentResponse || entry.chatbotFeedback?.aiResponse)
-  ).length;
+  const entriesWithChatbot = entries.filter((entry) => hasChatbotEvidence(entry.chatbotFeedback)).length;
+  const observedPatterns = useMemo(() => {
+    const byWeek = new Map<string, ClassWeekPatternStat>();
+    entries.forEach((entry) => {
+      const week = entry.weekNumber || 'not captured';
+      const stat = byWeek.get(week) ?? {
+        week,
+        count: 0,
+        peer: 0,
+        vocab: 0,
+        translations: 0,
+        photos: 0,
+        chatbot: 0,
+        warnings: 0,
+        sentFeedback: 0,
+      };
+      stat.count += 1;
+      if (entry.peerFeedback.length > 0) stat.peer += 1;
+      if (entry.vocabCount > 0) stat.vocab += 1;
+      if (entry.translationCount > 0) stat.translations += 1;
+      if (entry.photoCount > 0) stat.photos += 1;
+      if (hasChatbotEvidence(entry.chatbotFeedback)) {
+        stat.chatbot += 1;
+      }
+      if ((entry.parseWarnings ?? []).length > 0) stat.warnings += 1;
+      if (sentEntryIds.has(entry.entryId)) stat.sentFeedback += 1;
+      byWeek.set(week, stat);
+    });
+
+    return buildClassPatternInsights(Array.from(byWeek.values()).sort((a, b) => compareWeekLabels(a.week, b.week)));
+  }, [entries, sentEntryIds]);
 
   const handleSort = (nextKey: ClassPatternsSortKey) => {
     if (sortKey === nextKey) {
@@ -1340,6 +1630,18 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
     }
     setSortKey(nextKey);
     setSortDirection('asc');
+  };
+  const applyPatternFilter = (action: ClassPatternFilterAction) => {
+    setClassFilter(action.classFilter ?? 'all');
+    setWeekFilter(action.weekFilter ?? 'all');
+    setFieldFilter(action.fieldFilter ?? 'all');
+    if (action.sortKey) setSortKey(action.sortKey);
+    if (action.sortDirection) setSortDirection(action.sortDirection);
+  };
+  const clearPatternFilters = () => {
+    setClassFilter('all');
+    setWeekFilter('all');
+    setFieldFilter('all');
   };
 
   return (
@@ -1357,7 +1659,7 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
           </p>
         </div>
         <p className="mt-3 max-w-4xl text-sm font-medium leading-relaxed text-slate-500">
-          These panels summarize activity traces and workflow records at class level. They surface what to inspect next; they do not rank students, infer proficiency, or claim learning gains.
+          These panels summarize activity traces and workflow records at class level. They suggest what to inspect next.
         </p>
       </section>
 
@@ -1388,6 +1690,11 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
           tone={warningEntries > 0 ? 'amber' : 'slate'}
         />
       </section>
+
+      <ObservedPatternsPanel
+        patterns={observedPatterns}
+        onApply={applyPatternFilter}
+      />
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
@@ -1431,8 +1738,8 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
           }))}
         />
         <DistributionPanel
-          title="Entries Per Represented Student"
-          description="Distribution across students present in saved entry identity fields. This is not a roster-completion measure."
+          title="Entries Per Student"
+          description="Distribution across students present in saved entry identity fields."
           total={representedStudents}
           rows={[
             { label: '1 entry', count: studentEntryBands.one },
@@ -1455,7 +1762,7 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
         />
         <DistributionPanel
           title="Vocabulary Count Bands"
-          description="Entry-level vocabulary item counts. These are activity counts, not vocabulary sophistication or proficiency."
+          description="Entry-level vocabulary item counts. These are simple, numerical counts."
           total={entries.length}
           rows={[
             { label: '0 items', count: entries.filter((entry) => entry.vocabCount === 0).length },
@@ -1480,6 +1787,7 @@ const ClassPatternsTab: React.FC<ClassPatternsTabProps> = ({
         onWeekFilterChange={setWeekFilter}
         onFieldFilterChange={setFieldFilter}
         onSort={handleSort}
+        onClearFilters={clearPatternFilters}
       />
     </div>
   );
@@ -1499,7 +1807,66 @@ interface ClassPatternEvidenceTableProps {
   onWeekFilterChange: (value: string) => void;
   onFieldFilterChange: (value: ClassPatternsFieldFilter) => void;
   onSort: (key: ClassPatternsSortKey) => void;
+  onClearFilters: () => void;
 }
+
+const ObservedPatternsPanel: React.FC<{
+  patterns: ClassPatternInsight[];
+  onApply: (action: ClassPatternFilterAction) => void;
+}> = ({ patterns, onApply }) => (
+  <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+    <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Observed Patterns</p>
+        <h3 className="text-base font-black text-slate-900">Class-level signals to inspect</h3>
+      </div>
+      <p className="text-xs font-semibold text-slate-400">Loaded evidence only</p>
+    </div>
+
+    {patterns.length === 0 ? (
+      <p className="mt-4 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 text-xs font-semibold text-slate-500">
+        No class-level patterns are available for the loaded entries.
+      </p>
+    ) : (
+      <div className="mt-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+        {patterns.map((pattern) => (
+          <ObservedPatternCard key={pattern.id} pattern={pattern} onApply={onApply} />
+        ))}
+      </div>
+    )}
+  </section>
+);
+
+const ObservedPatternCard: React.FC<{
+  pattern: ClassPatternInsight;
+  onApply: (action: ClassPatternFilterAction) => void;
+}> = ({ pattern, onApply }) => {
+  const toneClass = {
+    slate: 'border-slate-200 bg-slate-50 text-slate-600',
+    amber: 'border-amber-200 bg-amber-50 text-amber-700',
+    emerald: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    indigo: 'border-indigo-200 bg-indigo-50 text-indigo-700',
+  }[pattern.tone];
+
+  return (
+    <article className="flex min-h-[128px] flex-col justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+      <div>
+        <p className="text-sm font-black leading-snug text-slate-900">{pattern.title}</p>
+        <div className="mt-3 flex flex-wrap items-baseline gap-2">
+          <span className={`rounded-lg border px-2 py-1 text-xs font-black ${toneClass}`}>{pattern.value}</span>
+          <span className="text-xs font-semibold leading-relaxed text-slate-500">{pattern.detail}</span>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => onApply(pattern.action)}
+        className="mt-3 self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-black uppercase tracking-wider text-indigo-600 transition-colors hover:border-indigo-200 hover:bg-indigo-50"
+      >
+        Show evidence
+      </button>
+    </article>
+  );
+};
 
 const ClassPatternEvidenceTable: React.FC<ClassPatternEvidenceTableProps> = ({
   rows,
@@ -1515,53 +1882,84 @@ const ClassPatternEvidenceTable: React.FC<ClassPatternEvidenceTableProps> = ({
   onWeekFilterChange,
   onFieldFilterChange,
   onSort,
-}) => (
-  <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-    <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 xl:flex-row xl:items-end xl:justify-between">
-      <div>
-        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Evidence</p>
-        <h3 className="text-base font-black text-slate-900">Entries behind Class Patterns</h3>
-        <p className="mt-1 text-xs font-medium text-slate-500">
-          Showing {rows.length} of {totalRows} saved entries. Filters narrow the evidence set without changing the aggregate doctrine.
-        </p>
-      </div>
-      <div className="grid gap-2 sm:grid-cols-3 xl:flex xl:items-center">
-        <FilterSelect
-          label="Class"
-          value={classFilter}
-          onChange={onClassFilterChange}
-          options={[
-            ['all', 'All classes'],
-            ...selectedClasses.map((cls) => [cls.id, cls.displayName] as [string, string]),
-          ]}
-        />
-        <FilterSelect
-          label="Week"
-          value={weekFilter}
-          onChange={onWeekFilterChange}
-          options={[
-            ['all', 'All weeks'],
-            ...weeks.map((week) => [week, week === 'not captured' ? 'week not captured' : `week ${week}`] as [string, string]),
-          ]}
-        />
-        <FilterSelect
-          label="Descriptor"
-          value={fieldFilter}
-          onChange={(value) => onFieldFilterChange(value as ClassPatternsFieldFilter)}
-          options={[
-            ['all', 'All entries'],
-            ['peerFeedback', 'Peer comments'],
-            ['vocab', 'Vocabulary'],
-            ['translations', 'Translations'],
-            ['photos', 'Photos'],
-            ['chatbot', 'Chatbot section'],
-            ['warnings', 'Warnings'],
-          ]}
-        />
-      </div>
-    </div>
+  onClearFilters,
+}) => {
+  const classLabel = classFilter === 'all'
+    ? null
+    : selectedClasses.find((cls) => cls.id === classFilter)?.displayName ?? classFilter;
+  const weekLabel = weekFilter === 'all' ? null : formatWeekLabel(weekFilter);
+  const descriptorLabel = fieldFilter === 'all' ? null : CLASS_PATTERN_FIELD_LABELS[fieldFilter];
+  const activeLabels = [classLabel, weekLabel, descriptorLabel].filter(Boolean) as string[];
 
-    <div className="overflow-x-auto">
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 xl:flex-row xl:items-end xl:justify-between">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Evidence</p>
+          <h3 className="text-base font-black text-slate-900">Entries behind Class Patterns</h3>
+          <p className="mt-1 text-xs font-medium text-slate-500">
+            Showing {rows.length} of {totalRows} loaded saved entries. Filters narrow this evidence set only.
+          </p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-3 xl:flex xl:items-center">
+          <FilterSelect
+            label="Class"
+            value={classFilter}
+            onChange={onClassFilterChange}
+            options={[
+              ['all', 'All classes'],
+              ...selectedClasses.map((cls) => [cls.id, cls.displayName] as [string, string]),
+            ]}
+          />
+          <FilterSelect
+            label="Week"
+            value={weekFilter}
+            onChange={onWeekFilterChange}
+            options={[
+              ['all', 'All weeks'],
+              ...weeks.map((week) => [week, formatWeekLabel(week)] as [string, string]),
+            ]}
+          />
+          <FilterSelect
+            label="Descriptor"
+            value={fieldFilter}
+            onChange={(value) => onFieldFilterChange(value as ClassPatternsFieldFilter)}
+            options={[
+              ['all', CLASS_PATTERN_FIELD_LABELS.all],
+              ['peerFeedback', CLASS_PATTERN_FIELD_LABELS.peerFeedback],
+              ['noPeerFeedback', CLASS_PATTERN_FIELD_LABELS.noPeerFeedback],
+              ['vocab', CLASS_PATTERN_FIELD_LABELS.vocab],
+              ['noVocab', CLASS_PATTERN_FIELD_LABELS.noVocab],
+              ['translations', CLASS_PATTERN_FIELD_LABELS.translations],
+              ['noTranslations', CLASS_PATTERN_FIELD_LABELS.noTranslations],
+              ['photos', CLASS_PATTERN_FIELD_LABELS.photos],
+              ['noPhotos', CLASS_PATTERN_FIELD_LABELS.noPhotos],
+              ['chatbot', CLASS_PATTERN_FIELD_LABELS.chatbot],
+              ['noChatbot', CLASS_PATTERN_FIELD_LABELS.noChatbot],
+              ['warnings', CLASS_PATTERN_FIELD_LABELS.warnings],
+              ['sentFeedback', CLASS_PATTERN_FIELD_LABELS.sentFeedback],
+              ['notSentFeedback', CLASS_PATTERN_FIELD_LABELS.notSentFeedback],
+            ]}
+          />
+        </div>
+      </div>
+
+      {activeLabels.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-indigo-50/40 px-5 py-3">
+          <p className="text-xs font-bold text-slate-600">
+            Showing loaded evidence for: <span className="text-indigo-700">{activeLabels.join(' · ')}</span>
+          </p>
+          <button
+            type="button"
+            onClick={onClearFilters}
+            className="rounded-lg border border-indigo-100 bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-indigo-600 hover:bg-indigo-50"
+          >
+            Clear filters
+          </button>
+        </div>
+      )}
+
+      <div className="overflow-x-auto">
       <table className="min-w-full border-separate border-spacing-0 text-left text-xs">
         <thead>
           <tr className="bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-400">
@@ -1601,6 +1999,7 @@ const ClassPatternEvidenceTable: React.FC<ClassPatternEvidenceTableProps> = ({
                 <td className="border-t border-slate-100 px-5 py-3 text-right font-black tabular-nums">{row.photoCount}</td>
                 <td className="border-t border-slate-100 px-5 py-3">
                   <div className="flex flex-wrap gap-1">
+                    {row.sentFeedbackPresent && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700">sent</span>}
                     {row.chatbotPresent && <span className="rounded-full bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-slate-500">chatbot</span>}
                     {row.warningCount > 0 && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700">{row.warningCount} warning{row.warningCount === 1 ? '' : 's'}</span>}
                     <span className="rounded-full bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-slate-500">
@@ -1616,9 +2015,10 @@ const ClassPatternEvidenceTable: React.FC<ClassPatternEvidenceTableProps> = ({
           )}
         </tbody>
       </table>
-    </div>
-  </section>
-);
+      </div>
+    </section>
+  );
+};
 
 const ClassPatternSortableHeader: React.FC<{
   label: string;
@@ -2046,26 +2446,6 @@ const EvidenceTable: React.FC<EvidenceTableProps> = ({
   </section>
 );
 
-const FilterSelect: React.FC<{
-  label: string;
-  value: string;
-  options: Array<[string, string]>;
-  onChange: (value: string) => void;
-}> = ({ label, value, options, onChange }) => (
-  <label className="flex flex-col gap-1">
-    <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">{label}</span>
-    <select
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs font-bold text-slate-600 shadow-sm focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-100"
-    >
-      {options.map(([optionValue, optionLabel]) => (
-        <option key={optionValue} value={optionValue}>{optionLabel}</option>
-      ))}
-    </select>
-  </label>
-);
-
 const SortableHeader: React.FC<{
   label: string;
   sortKeyName: DataHealthSortKey;
@@ -2085,35 +2465,6 @@ const SortableHeader: React.FC<{
       <ArrowUpDown size={11} className={activeKey === sortKeyName && direction === 'desc' ? 'rotate-180' : ''} />
     </button>
   </th>
-);
-
-const MetricTile: React.FC<{
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  detail: string;
-  tone?: 'slate' | 'amber' | 'emerald' | 'indigo';
-}> = ({ icon, label, value, detail, tone = 'slate' }) => (
-  <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-    <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-      tone === 'amber'
-        ? 'bg-amber-50 text-amber-600'
-        : tone === 'emerald'
-          ? 'bg-emerald-50 text-emerald-600'
-          : tone === 'indigo'
-            ? 'bg-indigo-50 text-indigo-600'
-            : 'bg-slate-100 text-slate-600'
-    }`}>
-      {icon}
-    </div>
-    <div className="min-w-0">
-      <p className="truncate text-[9px] font-black uppercase tracking-widest text-slate-400">{label}</p>
-      <div className="mt-0.5 flex min-w-0 items-baseline gap-2">
-        <p className="text-2xl font-black leading-none tracking-tight text-slate-900">{value}</p>
-        <p className="truncate text-xs font-semibold text-slate-500">{detail}</p>
-      </div>
-    </div>
-  </div>
 );
 
 const ConditionRow: React.FC<{ label: string; value: string; detail: string }> = ({ label, value, detail }) => (

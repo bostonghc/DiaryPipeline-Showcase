@@ -4,6 +4,116 @@ This changelog records notable user-facing, workflow, persistence, and operation
 
 ---
 
+## [2026-11-20] - Preference Recovery and Mixed-Date Ordering
+
+### Fixed
+
+- Pending preference saves and legacy migrations cannot publish into another
+  saved-records account, including after switching away and back to the same one.
+- Failed preference reads cannot trigger legacy migration. Migration stays part
+  of initial loading and publishes only after persistence succeeds.
+- A written two-digit numeric year supplies the year for neighbouring year-less
+  dates on the same page, so `4/30/26` sorts before `May 1`.
+- Operator guidance now describes review focus and per-comment Apply, replacing
+  stale instructions for the retired AI Draft feature.
+
+---
+
+## [2026-11-18] - AI Feedback Review Replaces AI Draft
+
+### Changed
+
+- **The AI no longer writes feedback to students**: the per-field **AI Draft** button is replaced by **Review my feedback**. You write the feedback; the AI reviews your draft in a side pane with comments addressed to you. Your text changes only when you click **Apply** on a single comment, and you still send the message. Sent feedback stays human-authored.
+- **Review focus replaces drafting prompts**: Settings → Prompts now edits the review focus per field. Earlier custom drafting instructions are shown read-only with a "Copy into review focus" button.
+- **The reviewer runs on the server**: the Gemini key is server-only and is no longer injected into the browser bundle. Local-development browser AI features use `BROWSER_GEMINI_API_KEY`.
+- **Save and continue from the review pane**: **Save draft and review** saves the entry and immediately requests the review, with quiet saving progress and an explicit retry on failure. Successful prerequisite actions clear their stale review messages; the bottom bar's **Save Draft** remains save-only.
+
+### Added
+
+- **Research records**: each review is saved with its inputs, and each comment's outcome (applied or dismissed, by whom) is recorded. Sent feedback records list the reviews used (`aiReviewIds`).
+- **Access**: owner only by default; leads and interns are enabled with the `AI_REVIEW_ROLES` server setting after the evaluation checklist (`docs/reference/ai-review-evaluation.md`). The review rate limit is per instance, not a spending ceiling.
+
+### Operational
+
+- Deploying now requires a Gemini secret in Secret Manager, `roles/datastore.user` on the runtime service account, and a manual `firebase deploy --only firestore:rules`. Steps are in `docs/collaboration-pilot-deployment.md`.
+
+---
+
+## [2026-09-01] - Session Auth, Graph Error Truthfulness, Model Catalog
+
+### Fixed
+
+- **Local sign-in no longer silently fails after the Microsoft redirect**: the
+  session cookie was configured `secure: true`, and express-session refuses to
+  emit a Secure cookie over plain http. On localhost the cookie was never sent,
+  so sign-in appeared to succeed while every later request was anonymous.
+  `secure` now follows the transport; production still receives a Secure cookie
+  through `trust proxy`.
+- **"Unknown API Error" now names the actual failure**: proxy-generated errors
+  used a `{ error: "text" }` envelope, but the Graph SDK reads
+  `{ error: { code, message } }`, so the message and status were discarded
+  before reaching the UI. All proxy failures now use Graph's shape, and
+  placeholders always carry the HTTP status.
+- **Slow section listings are no longer reported as broken sections**: the Graph
+  proxy aborted upstream requests at 30s, which large OneNote page listings
+  routinely exceed. The limit is now 90s and configurable through
+  `GRAPH_PROXY_TIMEOUT_MS`, and a timeout returns a distinct `504
+  proxy_timeout` rather than a generic failure.
+- **Graph throttling reaches the sync cooldown**: `getSectionPages` swallowed
+  429s into a section-error placeholder, so the existing backoff never engaged
+  and a throttled run kept pushing.
+- **A retired AI model no longer fails silently**: `gemini-2.5-flash` was
+  withdrawn upstream and returned a hard 404, which the parser reported as
+  "no parsed entries available" — indistinguishable from an unparseable page.
+  Configuration failures are now raised and surfaced separately from parse
+  misses.
+- **Roster order is stable**: the class list had no sort and followed Graph's
+  discovery order, so a rescan reshuffled it. Saved classes now sort first,
+  then alphabetically.
+
+### Changed
+
+- **Model ids come from one catalog** (`services/geminiModels.ts`) rather than
+  five duplicated lists that had drifted out of agreement. Defaults are the
+  floating `-latest` aliases; retired ids remain valid in stored preferences
+  and resolve to a live replacement at call time, so a withdrawal does not
+  require a settings visit.
+- **Page-record reads are shared**: a short-TTL, in-flight-deduplicated cache
+  sits in front of `listPageSyncRecordsForClasses`, invalidated by every
+  page-record write, and the tree badge effect keys on class ids instead of the
+  notebook tree's object identity. One 28-minute session logged 9,463 reads
+  from this path alone — the read audit of 2026-08 had deferred this as "low
+  volume", a premise multi-class sync invalidated.
+
+---
+
+## [2026-08-27] - Capture Record Reconciliation
+
+### Fixed
+
+- **Untitled and synthetic error nodes no longer become capture jobs**: OneNote
+  `Untitled Page` placeholders and the UI's `Error loading pages` nodes are
+  excluded before the sync queue is written.
+- **Stored pages are reconciled by stable Graph ID**: Every successfully paginated
+  section becomes a safe reconciliation scope. Zero-entry records absent from that
+  scope are removed; missing records with saved evidence are retained and marked
+  archived; records found again are restored. Failed sections and unscoped legacy
+  records are deferred without blocking reconciliation elsewhere in the class.
+- **Page and section failures are reported separately**: Archive coverage counts
+  current page records only. Section page-list failures have their own warning,
+  page records belonging to unavailable sections are reported as awaiting
+  reconciliation, and retained historical pages are reported as archived rather
+  than failed. Archived source records are listed in the Class Dashboard so the
+  summary has an inspectable audit trail.
+- **Section page discovery is paginated**: OneNote page listing now follows every
+  Graph continuation response before reconciliation, preventing later pages from
+  being mistaken for deleted records.
+- **Capture issues have an explicit retry action**: The Class Dashboard can retry
+  the affected class. Synthetic section errors no longer offer the misleading
+  `Open page` command.
+
+---
+
 ## [2026-06-09] - Debug Read Meter & Log Export
 
 ### Operational
@@ -74,7 +184,7 @@ This changelog records notable user-facing, workflow, persistence, and operation
 
 ### Changed
 
-- **Canonical local path moved outside OneDrive**: Active development now happens from `~/dev/DiaryPipeline`, a plain local clone. The former OneDrive-hosted checkout at `<file-sync folder>/DiaryPipeline` is deprecated and should not be used for development.
+- **Canonical local path moved outside OneDrive**: Active development now happens from `~/dev/DiaryPipelineProject_github`, a plain local clone. The former OneDrive-hosted checkout at `~/Library/CloudStorage/OneDrive-<university>/DiaryPipelineProject_github` is deprecated and should not be used for development.
 - **GitHub-only cross-machine continuity**: GitHub is now the only path for moving code and project documentation between machines. Developers and agents should clone fresh per machine, copy/recreate local-only config (`.env.local`, `.mcp.json`) as needed, run `npm install`, `npm run check-env`, and `npm run verify`, then use normal `commit` / `push` / `pull` flows.
 - **Documentation aligned with migration**: README, ARCHITECTURE, ROADMAP, ACTIVE_REPO, AGENTS, CLAUDE, and `scripts/check-local-env.sh` now describe the new canonical path and warn against placing the active repo inside OneDrive, iCloud, Dropbox, or other file-sync folders.
 
@@ -188,9 +298,9 @@ This changelog records notable user-facing, workflow, persistence, and operation
 
 - **Mid-Semester Partial Entry Handling (parserService.ts)**: Removed `sawInvalidStructuredEntry` flag. Previously, any single entry block failing `missing_required_labels` aborted the entire page parse, discarding all complete entries. Now partial/incomplete entry blocks are silently skipped, and the parse returns whatever complete entries were found. A page only returns null if no entries at all succeeded.
 
-- **Student ID Regex (graphService.ts, App.tsx)**: Changed the student ID extraction pattern from `/\b(\d{7})\b/` to `/(?<!\d)(\d{7})(?!\d)/`. The old word-boundary approach missed IDs glued directly to names (`1234569Taro Yamada`) or prefixed with `At` (`At1234568 jiro sato`). The new digit-only lookahead/lookbehind correctly matches these while still rejecting 8-digit typos (`26630008`).
+- **Student ID Regex (graphService.ts, App.tsx)**: Changed the student ID extraction pattern from `/\b(\d{7})\b/` to `/(?<!\d)(\d{7})(?!\d)/`. The old word-boundary approach missed IDs glued directly to names (`1234573Yui Ito`) or prefixed with `At` (`At1234574 aoi mori`). The new digit-only lookahead/lookbehind correctly matches these while still rejecting 8-digit typos (`12345008`).
 
-- **Student Name Cleanup (graphService.ts)**: After extracting the 7-digit ID from a page title, now also strips a leading `At ` or `At` artifact and `@` separators before constructing the display name, so `At1234568 jiro sato` → `1234568 - jiro sato`.
+- **Student Name Cleanup (graphService.ts)**: After extracting the 7-digit ID from a page title, now also strips a leading `At ` or `At` artifact and `@` separators before constructing the display name, so `At1234574 aoi mori` → `1234574 - aoi mori`.
 
 - **Display Marker Bleed into Firestore (App.tsx)**: Hoisted `cleanNotebookDisplayName` and `cleanNotebookStudentName` helpers to component scope so the `?` (unrecognized ID) and `*` (changed since last sync) prefixes added by `graphService.getSectionPages` are stripped before any `persistPageSyncState` write and before any `handlePageClick` invocation. Previously the raw `page.displayName` including these markers was being saved as `pageTitle` in Firestore.
 
@@ -332,7 +442,7 @@ This changelog records notable user-facing, workflow, persistence, and operation
 - **Token Pass-through**: Updated the BFF proxy (`server.ts`) to explicitly return the `accessToken` alongside the account object during the OAuth callback, ensuring the frontend is immediately authorized to query the Graph API.
 - **Collaboration Space Naming**: Fixed a bug where pages in `_Collaboration Space` or `_Content Library` were incorrectly identified as having the student name "_Collaboration Space".
 - **AI Parsing Repetition**: Updated the workflow to automatically save parsed entries as "Drafts" to Firestore immediately after AI completion, preventing redundant API calls when navigating between students.
-- **Name Cleanup**: Added regex to strip leading numbers and dashes (e.g., "1234567 - ") from student names in page titles.
+- **Name Cleanup**: Added regex to strip leading numbers and dashes (e.g., "1234572 - ") from student names in page titles.
 - **Direct-to-Student Communication**: Wired up Graph API calls for sending feedback via Email and Teams. Improved student email resolution by extracting Student IDs (e.g., 7-digit numbers) from OneNote section names and matching them against Class Group members (`/groups/{classId}/members`) and global UPNs.
 - **Feedback Sandwich**: Implemented a "Feedback Sandwich" structure for delivering feedback, including zero-cost personalization for greetings using existing data and a customizable sign-off in Settings.
 

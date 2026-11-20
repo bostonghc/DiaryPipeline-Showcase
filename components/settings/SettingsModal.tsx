@@ -1,27 +1,40 @@
 import React from 'react';
+import { FeedbackPreferencesTab } from './FeedbackPreferencesTab';
 import {
   AlertTriangle,
+  BookOpen,
   BrainCircuit,
   CheckCircle2,
   ChevronRight,
   Cloud,
+  Compass,
   Copy,
   Database,
   EyeOff,
   Filter,
+  Info,
   KeyRound,
   Link2,
   RefreshCw,
   ShieldCheck,
+  MessageSquare,
   SlidersHorizontal,
   Terminal,
   Wand2,
   X,
   Zap,
 } from 'lucide-react';
-import { DEFAULT_FIELD_FEEDBACK_INSTRUCTIONS } from '../../services/prompts';
+import { DEFAULT_FIELD_REVIEW_FOCUS, type AiReviewFieldKey } from '../../services/aiFeedbackReview';
+import { earlierCustomDraftingInstruction, REVIEW_FOCUS_MAX_LENGTH } from '../../services/reviewFocus';
 import { getReadTotals, resetReadMeter } from '../../services/readMeter';
+import { useCollaborationAccess } from '../../hooks/useCollaborationAccess';
 import type { UserConfig, UserPreferences } from '../../types';
+import {
+  findGeminiModel,
+  isDeprecatedGeminiModel,
+  selectableGeminiModels,
+  type GeminiModelTier,
+} from '../../services/geminiModels';
 
 interface MachineConfig {
   filterStrings: string[];
@@ -71,6 +84,7 @@ interface Props {
   machineConfig: MachineConfig;
   setMachineConfig: React.Dispatch<React.SetStateAction<MachineConfig>>;
   preferences: Required<UserPreferences>;
+  preferencesLoading?: boolean;
   savePref: (updates: Partial<UserPreferences>) => Promise<void>;
   config: { isSandbox: boolean };
   setConfig: React.Dispatch<React.SetStateAction<{ isSandbox: boolean }>>;
@@ -91,14 +105,12 @@ interface Props {
   onClose: () => void;
 }
 
-type SettingsTab = 'connections' | 'runtime' | 'workflow' | 'ai' | 'prompts';
+type SettingsTab = 'feedback' | 'connections' | 'runtime' | 'workflow' | 'ai' | 'prompts' | 'about';
 
-type EditablePrefs = Pick<
+type EditablePrefs = Required<Pick<
   UserPreferences,
-  'feedbackTone' | 'teacherDisplayName' | 'customSignOff' | 'aiModelFeedback' | 'aiModelParsing' | 'aiPrompts'
->;
-
-type FeedbackPromptKey = keyof NonNullable<UserPreferences['aiPrompts']>;
+  'feedbackTone' | 'teacherDisplayName' | 'customSignOff' | 'aiModelFeedback' | 'aiModelParsing' | 'reviewFocus'
+>>;
 
 const sectionClass = 'bg-white rounded-xl p-5 border border-slate-200 shadow-sm';
 const sectionIconClass = 'w-8 h-8 bg-indigo-50 rounded-lg flex items-center justify-center text-indigo-600';
@@ -111,8 +123,52 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNo
   { id: 'connections', label: 'Connections', icon: <Cloud size={14} /> },
   { id: 'runtime', label: 'Runtime Config', icon: <KeyRound size={14} /> },
   { id: 'workflow', label: 'Workflow', icon: <SlidersHorizontal size={14} /> },
+  { id: 'feedback', label: 'Feedback', icon: <MessageSquare size={14} /> },
   { id: 'ai', label: 'AI Models', icon: <BrainCircuit size={14} /> },
   { id: 'prompts', label: 'Prompts', icon: <Wand2 size={14} /> },
+  { id: 'about', label: 'About', icon: <Info size={14} /> },
+];
+
+const PRODUCT_PRINCIPLES = [
+  'Teacher-in-the-loop review becomes student-facing feedback.',
+  'Dashboard counts describe workflow and evidence, not grades.',
+  'AI review assists with feedback and parsing; it does not replace instructor judgment.',
+  'Firestore is the working record for review state, feedback history, exports, and dashboards.',
+];
+
+const CURRENT_ROADMAP_ITEMS = [
+  {
+    status: 'Active',
+    title: 'Evidence-first class dashboard',
+    body: 'Review Queue, Data Health, Teacher Practice, Student Trajectories, and Class Patterns.',
+  },
+  {
+    status: 'Next',
+    title: 'Template-aware parsing',
+    body: 'Expand beyond the current diary template toward multiple format assignments and document structures, with parser strategies for each template.',
+  },
+  {
+    status: 'Next',
+    title: 'Responsive content panes',
+    body: 'Panes adapt to the template being opened, so diaries, assignments, rubrics, and future document types do not share one fixed layout.',
+  },
+  {
+    status: 'Next',
+    title: 'AI-agnostic setup',
+    body: 'Abstract parsing and feedback drafting behind provider settings so OpenAI, Anthropic, Gemini, or local models can be used.',
+  },
+  {
+    status: 'Next',
+    title: 'Feedback and rubric options',
+    body: 'Add preset feedback structures, correction styles, comprehensive modes, and rubric support for summative or assignment-specific review.',
+  },
+];
+
+const ROADMAP_WATCHLIST = [
+  'Provision a non-capped Firestore database if daily read caps recur during normal teacher use.',
+  'Add OneNote pagination insurance when section page counts exceed Graph defaults.',
+  'Split local and production Entra app registrations before deployment.',
+  'Add per-field AI provenance only when a dashboard consumer is ready.',
 ];
 
 const makeDraft = (p: Required<UserPreferences>): EditablePrefs => ({
@@ -121,7 +177,10 @@ const makeDraft = (p: Required<UserPreferences>): EditablePrefs => ({
   customSignOff: p.customSignOff,
   aiModelFeedback: p.aiModelFeedback,
   aiModelParsing: p.aiModelParsing,
-  aiPrompts: { ...p.aiPrompts },
+  // Blank saved values mean "use the default", so they are not part of the draft.
+  reviewFocus: Object.fromEntries(
+    Object.entries(p.reviewFocus ?? {}).filter(([, v]) => typeof v === 'string' && v.trim() !== ''),
+  ),
 });
 
 const countTrue = (values: boolean[]) => values.filter(Boolean).length;
@@ -130,6 +189,7 @@ export const SettingsModal: React.FC<Props> = ({
   machineConfig,
   setMachineConfig,
   preferences,
+  preferencesLoading = false,
   savePref,
   config,
   setConfig,
@@ -149,7 +209,11 @@ export const SettingsModal: React.FC<Props> = ({
   hasDebugActivity,
   onClose,
 }) => {
-  const [activeTab, setActiveTab] = React.useState<SettingsTab>('connections');
+  const { account, profile: accessProfile } = useCollaborationAccess();
+  const canManageSettings = !account || accessProfile?.capabilities.canManageSettings === true;
+  const tabs = SETTINGS_TABS.filter(tab => canManageSettings || ['feedback', 'prompts', 'about'].includes(tab.id));
+  const [selectedTab, setActiveTab] = React.useState<SettingsTab>(canManageSettings ? 'connections' : 'feedback');
+  const activeTab = tabs.some(tab => tab.id === selectedTab) ? selectedTab : 'feedback';
   const [runtimeStatus, setRuntimeStatus] = React.useState<RuntimeConfigStatus | null>(null);
   const [runtimeError, setRuntimeError] = React.useState<string | null>(null);
   const [runtimeLoading, setRuntimeLoading] = React.useState(true);
@@ -157,25 +221,29 @@ export const SettingsModal: React.FC<Props> = ({
   const [draft, setDraft] = React.useState<EditablePrefs>(() => makeDraft(preferences));
   const [saving, setSaving] = React.useState(false);
   const [justSaved, setJustSaved] = React.useState(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
 
   // Live Firestore read count for the debug stream. Polled (not pushed) and only
   // while the stream is open, so a burst of reads never triggers re-renders.
   const [readStats, setReadStats] = React.useState(() => getReadTotals());
   React.useEffect(() => {
-    if (!showDebugStream) return;
+    if (!showDebugStream || !canManageSettings) return;
     setReadStats(getReadTotals());
     const id = window.setInterval(() => setReadStats(getReadTotals()), 1000);
     return () => window.clearInterval(id);
-  }, [showDebugStream]);
+  }, [showDebugStream, canManageSettings]);
   const resetReads = () => {
     resetReadMeter();
     setReadStats(getReadTotals());
   };
   const readsSince = new Date(readStats.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+  // App creates a fresh preferences object on render. Reset only when saved
+  // values change, so background activity cannot erase an in-progress edit.
+  const savedDraftKey = JSON.stringify(makeDraft(preferences));
   React.useEffect(() => {
-    setDraft(makeDraft(preferences));
-  }, [preferences]);
+    setDraft(JSON.parse(savedDraftKey));
+  }, [savedDraftKey]);
 
   const loadRuntimeStatus = React.useCallback(async () => {
     setRuntimeLoading(true);
@@ -193,11 +261,10 @@ export const SettingsModal: React.FC<Props> = ({
   }, []);
 
   React.useEffect(() => {
-    void loadRuntimeStatus();
-  }, [loadRuntimeStatus]);
+    if (canManageSettings) void loadRuntimeStatus();
+  }, [loadRuntimeStatus, canManageSettings]);
 
-  const isDirty = JSON.stringify(draft) !== JSON.stringify(makeDraft(preferences));
-  const aiPrompts = draft.aiPrompts;
+  const isDirty = JSON.stringify(draft) !== savedDraftKey;
 
   const copyText = async (key: string, value: string) => {
     try {
@@ -209,12 +276,37 @@ export const SettingsModal: React.FC<Props> = ({
     }
   };
 
+  const saveUnavailableReason = !connectionState.firebaseSignedIn
+    ? 'Connect saved records to load and save your feedback preferences.'
+    : preferencesLoading ? 'Wait for your saved preferences to finish loading.' : null;
+
+  // Firestore merges maps, so a key dropped from the draft must be sent as ''
+  // to clear a value saved earlier ('' means "use the default").
+  const reviewFocusForSave = () => {
+    const out: Record<string, string> = {};
+    const keys = new Set([...Object.keys(preferences.reviewFocus ?? {}), ...Object.keys(draft.reviewFocus)]);
+    for (const key of keys) out[key] = draft.reviewFocus[key as AiReviewFieldKey] ?? '';
+    return out;
+  };
+
   const handleSavePreferences = async () => {
+    if (saveUnavailableReason || saving || !isDirty) return;
     setSaving(true);
+    setSaveError(null);
     try {
-      await savePref(draft);
+      await savePref(canManageSettings ? { ...draft, reviewFocus: reviewFocusForSave(), reviewFocusVersion: 1 } : {
+        feedbackTone: draft.feedbackTone,
+        teacherDisplayName: draft.teacherDisplayName,
+        customSignOff: draft.customSignOff,
+        reviewFocus: reviewFocusForSave(),
+        reviewFocusVersion: 1,
+      });
       setJustSaved(true);
       setTimeout(() => setJustSaved(false), 2000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSaveError(message);
+      addLog(`Preferences save failed: ${message}`);
     } finally {
       setSaving(false);
     }
@@ -244,6 +336,8 @@ export const SettingsModal: React.FC<Props> = ({
       ])
     : 0;
 
+  if (account && !accessProfile?.allowed) return null;
+
   return (
     <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full flex flex-col animate-in zoom-in duration-200 max-h-[90vh] overflow-hidden relative">
@@ -263,13 +357,13 @@ export const SettingsModal: React.FC<Props> = ({
                   <ShieldCheck size={24} />
                 </div>
                 <div>
-                  <h3 className="text-xl font-black tracking-tight text-slate-900">Settings & Connections</h3>
+                  <h3 className="text-xl font-black tracking-tight text-slate-900">{canManageSettings ? 'Settings & Connections' : 'Your Preferences'}</h3>
                   <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mt-1">
-                    Setup status, workflow, and AI behavior
+                    {canManageSettings ? 'Setup status, workflow, and feedback preferences' : 'Feedback style, closing, and review focus'}
                   </p>
                 </div>
               </div>
-              <button
+              {canManageSettings && <button
                 onClick={() => setShowDebugStream(prev => !prev)}
                 className={`shrink-0 inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-[10px] font-black uppercase tracking-widest transition-colors ${
                   showDebugStream
@@ -283,11 +377,11 @@ export const SettingsModal: React.FC<Props> = ({
                 {hasDebugActivity && (
                   <span className={`inline-flex h-2.5 w-2.5 rounded-full ${isInteracting ? 'bg-emerald-400 animate-pulse' : 'bg-indigo-400'}`} />
                 )}
-              </button>
+              </button>}
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {SETTINGS_TABS.map((tab) => (
+              {tabs.map((tab) => (
                 <button
                   key={tab.id}
                   type="button"
@@ -304,7 +398,7 @@ export const SettingsModal: React.FC<Props> = ({
               ))}
             </div>
 
-            {showDebugStream && (
+            {canManageSettings && showDebugStream && (
               <div className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden shadow-sm">
                 <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between gap-4">
                   <div>
@@ -338,6 +432,28 @@ export const SettingsModal: React.FC<Props> = ({
               </div>
             )}
           </div>
+
+          {saveUnavailableReason && (
+            <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-800">
+              <p>{saveUnavailableReason}</p>
+              {!connectionState.firebaseSignedIn && <button type="button" onClick={onFirebaseLogin} className="mt-2 font-bold underline">Connect saved records</button>}
+            </div>
+          )}
+
+          {/* While saved preferences load, the draft still holds defaults. Typing now
+              would be replaced by the loaded values, so the editable tabs wait. The
+              banner above gives the reason. */}
+          <fieldset
+            disabled={preferencesLoading && ['feedback', 'ai', 'prompts'].includes(activeTab)}
+            className="m-0 min-w-0 border-0 p-0 disabled:opacity-60"
+          >
+          {activeTab === 'feedback' && (
+            <FeedbackPreferencesTab
+              value={draft}
+              onChange={updates => setDraft(current => ({ ...current, ...updates }))}
+              aiAvailable={geminiConfigured}
+            />
+          )}
 
           {activeTab === 'connections' && (
             <ConnectionsTab
@@ -387,14 +503,21 @@ export const SettingsModal: React.FC<Props> = ({
           )}
 
           {activeTab === 'prompts' && (
-            <PromptsTab aiPrompts={aiPrompts} setDraft={setDraft} />
+            <PromptsTab reviewFocus={draft.reviewFocus} earlierPrompts={preferences.aiPrompts} setDraft={setDraft} />
           )}
+
+          {activeTab === 'about' && (
+            <AboutTab />
+          )}
+          </fieldset>
         </div>
 
         <div className="border-t border-slate-200 px-6 md:px-8 py-4 flex items-center justify-between bg-white">
           <span className="text-[11px] font-medium text-slate-400">
             {justSaved
               ? 'Preferences saved'
+              : saveError
+                ? saveError
               : isDirty
                 ? 'Unsaved preference changes'
                 : activeTab === 'runtime'
@@ -403,7 +526,8 @@ export const SettingsModal: React.FC<Props> = ({
           </span>
           <button
             onClick={handleSavePreferences}
-            disabled={!isDirty || saving}
+            disabled={!isDirty || saving || Boolean(saveUnavailableReason)}
+            title={saveUnavailableReason || undefined}
             className="px-5 py-2.5 rounded-xl text-xs font-bold transition-colors bg-indigo-600 hover:bg-indigo-700 text-white disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed"
           >
             {saving ? 'Saving...' : 'Save Preferences'}
@@ -492,7 +616,7 @@ const ConnectionsTab: React.FC<{
         <ConnectionCard
           icon={<BrainCircuit size={18} />}
           title="Gemini AI"
-          subtitle="AI parsing fallback, feedback drafting, and semantic summaries"
+          subtitle="AI review of your feedback (server key) and local browser parsing (BROWSER_GEMINI_API_KEY)"
           configured={geminiConfigured}
           connected={geminiConfigured}
           connectedLabel={geminiConfigured ? 'API key available' : 'API key missing'}
@@ -701,8 +825,9 @@ const WorkflowTab: React.FC<{
       <div className="space-y-4">
         <p className={descriptionClass}>Add keywords to help the app find your notebooks. Separate multiple keywords with commas.</p>
         <div className="space-y-2">
-          <label className={labelClass}>Filter Keywords</label>
+          <label htmlFor="settings-filter-keywords" className={labelClass}>Filter Keywords</label>
           <input
+            id="settings-filter-keywords"
             type="text"
             value={machineConfig.filterStrings.join(', ')}
             onChange={e => {
@@ -721,8 +846,9 @@ const WorkflowTab: React.FC<{
       <SectionHeader icon={<RefreshCw size={16} />} title="Sync & Performance" />
       <div className="space-y-6">
         <div className="space-y-2">
-          <label className={labelClass}>Auto-Sync Frequency</label>
+          <label htmlFor="settings-sync-frequency" className={labelClass}>Auto-Sync Frequency</label>
           <select
+            id="settings-sync-frequency"
             value={machineConfig.syncFrequency}
             onChange={e => setMachineConfig(prev => ({ ...prev, syncFrequency: e.target.value as MachineConfig['syncFrequency'] }))}
             className={controlClass}
@@ -758,6 +884,37 @@ const WorkflowTab: React.FC<{
   </div>
 );
 
+/**
+ * Model choices rendered from the shared catalog rather than hardcoded options,
+ * so a retirement is a one-line catalog edit. `preferredTier` only marks the
+ * recommendation for this field — both tiers stay selectable.
+ *
+ * A retired id that is still saved in preferences is rendered as a disabled
+ * option; without it the <select> would show blank and silently rewrite the
+ * user's stored value on the next save.
+ */
+const GeminiModelOptions: React.FC<{
+  selected: string;
+  preferredTier: GeminiModelTier;
+}> = ({ selected, preferredTier }) => {
+  const options = selectableGeminiModels();
+  const retired = isDeprecatedGeminiModel(selected) ? findGeminiModel(selected) : undefined;
+  return (
+    <>
+      {options.map((model) => (
+        <option key={model.id} value={model.id}>
+          {model.label}{model.tier === preferredTier && model.kind === 'alias' ? ' — Recommended' : ''}
+        </option>
+      ))}
+      {retired && (
+        <option value={retired.id} disabled>
+          {retired.label} — no longer available
+        </option>
+      )}
+    </>
+  );
+};
+
 const AiModelsTab: React.FC<{
   draft: EditablePrefs;
   setDraft: React.Dispatch<React.SetStateAction<EditablePrefs>>;
@@ -767,113 +924,71 @@ const AiModelsTab: React.FC<{
     <div className="space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="space-y-2">
-          <label className={labelClass}>AI Parsing Model</label>
+          <label htmlFor="settings-ai-parsing-model" className={labelClass}>AI Parsing Model</label>
           <select
+            id="settings-ai-parsing-model"
             value={draft.aiModelParsing}
             onChange={e => setDraft(d => ({ ...d, aiModelParsing: e.target.value as EditablePrefs['aiModelParsing'] }))}
             className={controlClass}
           >
-            <option value="gemini-2.5-flash">Gemini 2.5 Flash (Recommended)</option>
-            <option value="gemini-3-flash">Gemini 3 Flash (Legacy fallback)</option>
-            <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite (Budget)</option>
+            <GeminiModelOptions selected={draft.aiModelParsing} preferredTier="flash" />
           </select>
         </div>
         <div className="space-y-2">
-          <label className={labelClass}>Feedback Draft Model</label>
+          <label htmlFor="settings-ai-review-model" className={labelClass}>AI Review Model</label>
           <select
+            id="settings-ai-review-model"
             value={draft.aiModelFeedback}
             onChange={e => setDraft(d => ({ ...d, aiModelFeedback: e.target.value as EditablePrefs['aiModelFeedback'] }))}
             className={controlClass}
           >
-            <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite (Recommended)</option>
-            <option value="gemini-2.5-flash">Gemini 2.5 Flash (Higher quality)</option>
-            <option value="gemini-3-flash">Gemini 3 Flash (Legacy fallback)</option>
+            <GeminiModelOptions selected={draft.aiModelFeedback} preferredTier="flash-lite" />
           </select>
+          <p className="text-[10px] text-slate-500 leading-relaxed">This model applies to AI review of your feedback.</p>
         </div>
       </div>
       <p className="text-[10px] text-slate-500 leading-relaxed">
         Per-class parser mode is chosen in the roster list. Use <span className="font-bold text-slate-700">AI</span> for flexible legacy notebooks and <span className="font-bold text-slate-700">Labels</span> for the new labeled diary template that should parse without API calls.
       </p>
-      <div className="space-y-2">
-        <label className={labelClass}>Feedback Tone</label>
-        <input
-          type="text"
-          value={draft.feedbackTone}
-          onChange={e => setDraft(d => ({ ...d, feedbackTone: e.target.value }))}
-          placeholder="e.g. professional and encouraging"
-          className={controlClass}
-        />
-      </div>
-      <div className="space-y-2">
-        <label className={labelClass}>Display Name</label>
-        <input
-          type="text"
-          value={draft.teacherDisplayName}
-          onChange={e => setDraft(d => ({ ...d, teacherDisplayName: e.target.value }))}
-          placeholder="Mr. Carr"
-          className={controlClass}
-        />
-        <p className="text-[10px] text-slate-500">Replaces [Teacher Name] in sign-offs. Leave blank to use your Entra ID name.</p>
-      </div>
-      <div className="space-y-2">
-        <label className={labelClass}>Custom Sign-off</label>
-        <textarea
-          value={draft.customSignOff}
-          onChange={e => setDraft(d => ({ ...d, customSignOff: e.target.value }))}
-          placeholder={"Looking forward to your next entry,\n\n[Teacher Name]"}
-          className={`${controlClass} h-24`}
-        />
-        <p className="text-[10px] text-slate-500">Use [Teacher Name] as a placeholder for your display name above.</p>
-      </div>
     </div>
   </div>
 );
 
+const REVIEW_FOCUS_FIELDS: ReadonlyArray<readonly [AiReviewFieldKey, string]> = [
+  ['diaryText', 'Diary Text'],
+  ['peerFeedback', 'Peer Feedback'],
+  ['vocab', 'Vocabulary'],
+  ['translations', 'Definitions & Examples'],
+  ['chatbot', 'Chatbot'],
+  ['overall', 'General Feedback'],
+];
+
 const PromptsTab: React.FC<{
-  aiPrompts: EditablePrefs['aiPrompts'];
+  reviewFocus: EditablePrefs['reviewFocus'];
+  /** Earlier drafting instructions: read-only reference, never used as review focus. */
+  earlierPrompts: UserPreferences['aiPrompts'];
   setDraft: React.Dispatch<React.SetStateAction<EditablePrefs>>;
-}> = ({ aiPrompts, setDraft }) => {
-  const promptFields = [
-    ['diaryText', 'Diary Text'],
-    ['peerFeedback', 'Peer Feedback'],
-    ['vocab', 'Vocabulary'],
-    ['translations', 'Definitions & Examples'],
-    ['overall', 'General Feedback'],
-  ] as const;
-
-  const resetPrompt = (key: FeedbackPromptKey) => {
-    setDraft(d => ({
-      ...d,
-      aiPrompts: {
-        ...d.aiPrompts,
-        [key]: DEFAULT_FIELD_FEEDBACK_INSTRUCTIONS[key],
-      },
-    }));
-  };
-
-  const resetAllPrompts = () => {
-    setDraft(d => ({
-      ...d,
-      aiPrompts: {
-        ...d.aiPrompts,
-        diaryText: DEFAULT_FIELD_FEEDBACK_INSTRUCTIONS.diaryText,
-        peerFeedback: DEFAULT_FIELD_FEEDBACK_INSTRUCTIONS.peerFeedback,
-        vocab: DEFAULT_FIELD_FEEDBACK_INSTRUCTIONS.vocab,
-        translations: DEFAULT_FIELD_FEEDBACK_INSTRUCTIONS.translations,
-        overall: DEFAULT_FIELD_FEEDBACK_INSTRUCTIONS.overall,
-      },
-    }));
-  };
+}> = ({ reviewFocus, earlierPrompts, setDraft }) => {
+  const setFocus = (key: AiReviewFieldKey, text: string) =>
+    setDraft(d => ({ ...d, reviewFocus: { ...d.reviewFocus, [key]: text } }));
+  // Reset drops the draft value; on save, a previously saved key is written as ''
+  // (see handleSavePreferences) so the merge write clears it.
+  const resetFocus = (key: AiReviewFieldKey) =>
+    setDraft(d => {
+      const { [key]: _removed, ...rest } = d.reviewFocus;
+      return { ...d, reviewFocus: rest };
+    });
+  const resetAllFocus = () => setDraft(d => ({ ...d, reviewFocus: {} }));
 
   return (
     <div className={sectionClass}>
       <SectionHeader
         icon={<Wand2 size={16} />}
-        title="AI Feedback Drafting Prompts"
+        title="AI Review Focus"
         action={
           <button
             type="button"
-            onClick={resetAllPrompts}
+            onClick={resetAllFocus}
             className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-slate-500 transition-colors hover:border-slate-300 hover:text-slate-700"
           >
             Reset all
@@ -882,32 +997,132 @@ const PromptsTab: React.FC<{
       />
       <div className="space-y-4">
         <p className={descriptionClass}>
-          These instructions guide the student-facing AI Draft suggestions for each feedback field. They do not evaluate students or create diagnostic scores.
+          These instructions tell the AI reviewer what good feedback on each field should do. The reviewer comments on your feedback; it never writes to students.
         </p>
-        {promptFields.map(([key, label]) => (
-          <div key={key} className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <label className={labelClass}>{label}</label>
-              <button
-                type="button"
-                onClick={() => resetPrompt(key)}
-                className="text-[10px] font-bold uppercase tracking-wider text-slate-400 transition-colors hover:text-indigo-600"
-              >
-                Reset
-              </button>
+        {REVIEW_FOCUS_FIELDS.map(([key, label]) => {
+          const earlier = earlierCustomDraftingInstruction({ aiPrompts: earlierPrompts }, key);
+          const custom = reviewFocus[key];
+          return (
+            <div key={key} className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor={`settings-review-focus-${key}`} className={labelClass}>{label}</label>
+                <button
+                  type="button"
+                  onClick={() => resetFocus(key)}
+                  className="text-[10px] font-bold uppercase tracking-wider text-slate-400 transition-colors hover:text-indigo-600"
+                >
+                  Reset
+                </button>
+              </div>
+              <textarea
+                id={`settings-review-focus-${key}`}
+                value={custom ?? DEFAULT_FIELD_REVIEW_FOCUS[key]}
+                maxLength={REVIEW_FOCUS_MAX_LENGTH}
+                onChange={e => setFocus(key, e.target.value)}
+                className={`${controlClass} resize-none`}
+                rows={2}
+              />
+              <p className="text-right text-[10px] text-slate-400">
+                {(custom ?? DEFAULT_FIELD_REVIEW_FOCUS[key]).length} / {REVIEW_FOCUS_MAX_LENGTH}
+              </p>
+              {earlier && (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                    Your earlier drafting instructions (no longer used)
+                  </p>
+                  <p className="text-[11px] text-slate-600 whitespace-pre-wrap">{earlier}</p>
+                  <button
+                    type="button"
+                    onClick={() => setFocus(key, earlier.slice(0, REVIEW_FOCUS_MAX_LENGTH))}
+                    className="text-[10px] font-bold uppercase tracking-wider text-indigo-500 transition-colors hover:text-indigo-700"
+                  >
+                    Copy into review focus
+                  </button>
+                </div>
+              )}
             </div>
-            <textarea
-              value={aiPrompts[key]}
-              onChange={e => setDraft(d => ({ ...d, aiPrompts: { ...d.aiPrompts, [key]: e.target.value } }))}
-              className={`${controlClass} resize-none`}
-              rows={2}
-            />
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 };
+
+const AboutTab: React.FC = () => (
+  <div className="space-y-5">
+    <section className={sectionClass}>
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div className="flex items-start gap-4">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white">
+            <BookOpen size={22} />
+          </div>
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Notebook Feedback Studio</p>
+            <h4 className="mt-1 text-xl font-black tracking-tight text-slate-950">Feedback and research for OneNote Class Notebooks</h4>
+            <p className="mt-2 max-w-3xl text-sm font-semibold leading-relaxed text-slate-500">
+              A teacher-mediated workflow for collecting OneNote diary evidence, drafting focused feedback,
+              sending it through Microsoft 365, and preserving the review record for reflection and research. Part of the DiaryPipeline research project.
+            </p>
+          </div>
+        </div>
+        <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-indigo-700">
+          Local dev
+        </span>
+      </div>
+    </section>
+
+    <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+      <div className={sectionClass}>
+        <SectionHeader icon={<ShieldCheck size={16} />} title="Operating Principles" />
+        <div className="space-y-3">
+          {PRODUCT_PRINCIPLES.map((principle) => (
+            <div key={principle} className="flex items-start gap-3 border-t border-slate-100 pt-3 first:border-t-0 first:pt-0">
+              <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-emerald-600" />
+              <p className="text-xs font-semibold leading-relaxed text-slate-600">{principle}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className={sectionClass}>
+        <SectionHeader icon={<Compass size={16} />} title="Current Roadmap" />
+        <div className="space-y-3">
+          {CURRENT_ROADMAP_ITEMS.map((item) => (
+            <article key={item.title} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h5 className="text-sm font-black text-slate-900">{item.title}</h5>
+                <span
+                  className={`shrink-0 rounded-full border px-2 py-1 text-[9px] font-black uppercase tracking-widest ${
+                    item.status === 'Active'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                  }`}
+                >
+                  {item.status}
+                </span>
+              </div>
+              <p className="mt-2 text-xs font-medium leading-relaxed text-slate-500">{item.body}</p>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section className={sectionClass}>
+      <SectionHeader icon={<AlertTriangle size={16} />} title="Watchlist" />
+      <div className="grid gap-3 md:grid-cols-2">
+        {ROADMAP_WATCHLIST.map((item) => (
+          <div key={item} className="rounded-xl border border-amber-100 bg-amber-50/60 p-4">
+            <p className="text-xs font-semibold leading-relaxed text-amber-900">{item}</p>
+          </div>
+        ))}
+      </div>
+      <p className="mt-4 text-[10px] font-semibold leading-relaxed text-slate-400">
+        This panel is a concise operator view. The durable planning source remains ROADMAP.md and linked planning documents.
+      </p>
+    </section>
+  </div>
+);
 
 const SectionHeader: React.FC<{ icon: React.ReactNode; title: string; action?: React.ReactNode }> = ({ icon, title, action }) => (
   <div className="flex items-center justify-between mb-4">
@@ -926,10 +1141,13 @@ const NumberInput: React.FC<{
   max?: number;
   step?: number;
   onChange: (value: number) => void;
-}> = ({ label, value, min, max, step, onChange }) => (
+}> = ({ label, value, min, max, step, onChange }) => {
+  const inputId = `settings-number-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+  return (
   <div className="space-y-2">
-    <label className={labelClass}>{label}</label>
+    <label htmlFor={inputId} className={labelClass}>{label}</label>
     <input
+      id={inputId}
       type="number"
       min={min}
       max={max}
@@ -939,7 +1157,8 @@ const NumberInput: React.FC<{
       className={controlClass}
     />
   </div>
-);
+  );
+};
 
 const ConnectionCard: React.FC<{
   icon: React.ReactNode;
@@ -1058,7 +1277,7 @@ const buildRuntimeRows = (status: RuntimeConfigStatus | null): RuntimeRow[] => [
     name: 'GEMINI_API_KEY',
     configured: Boolean(status?.ai.geminiApiKeySet),
     configuredLabel: 'Configured server-side',
-    purpose: 'Enables AI parsing fallback and feedback drafting.',
+    purpose: 'Server-only key for AI feedback review. Browser AI parsing in local development uses BROWSER_GEMINI_API_KEY instead.',
     configureIn: '.env.local / deployment secret',
     restartRequired: true,
     secret: true,

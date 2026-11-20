@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookOpen, CheckCircle, LayoutGrid, Loader2, RefreshCw } from 'lucide-react';
+import { BookOpen, CheckCircle, Database, LayoutGrid, Loader2, RefreshCw } from 'lucide-react';
 
 interface NoPageSelectedStateProps {
   isSyncingClass: boolean;
@@ -7,6 +7,9 @@ interface NoPageSelectedStateProps {
   syncingClassName: string | null;
   hasAnySyncedClass: boolean;
   selectedNotebookCount: number;
+  /** Google (Firebase) sign-in present. Syncing and saving need it; browsing does not. */
+  googleConnected: boolean;
+  onConnectGoogle: () => void;
 }
 
 export const NoPageSelectedState: React.FC<NoPageSelectedStateProps> = ({
@@ -15,6 +18,8 @@ export const NoPageSelectedState: React.FC<NoPageSelectedStateProps> = ({
   syncingClassName,
   hasAnySyncedClass,
   selectedNotebookCount,
+  googleConnected,
+  onConnectGoogle,
 }) => {
   if (isSyncingClass) {
     const hasProgress = syncProgress.total > 0;
@@ -83,6 +88,23 @@ export const NoPageSelectedState: React.FC<NoPageSelectedStateProps> = ({
     );
   }
 
+  // Sync All Selected is disabled without the Google sign-in, so telling
+  // people to use it would send them to a dead button (2026-10-09: an intern
+  // signed in to Microsoft only and was stuck here).
+  if (!hasAnySyncedClass && !googleConnected) {
+    return (
+      <NextActionCard
+        tone="indigo"
+        icon={<Database size={20} />}
+        iconClassName="bg-indigo-50 text-indigo-600"
+        title="Connect your Google account"
+        body="Your university account opens the diaries. Your Google account saves your work, so syncing needs it too. The app sees only your name and email address."
+        actionLabel="Connect Google Account"
+        onAction={onConnectGoogle}
+      />
+    );
+  }
+
   if (!hasAnySyncedClass) {
     return (
       <NextActionCard
@@ -114,9 +136,11 @@ interface NextActionCardProps {
   iconClassName: string;
   title: string;
   body: string;
+  actionLabel?: string;
+  onAction?: () => void;
 }
 
-const NextActionCard: React.FC<NextActionCardProps> = ({ tone, icon, iconClassName, title, body }) => {
+const NextActionCard: React.FC<NextActionCardProps> = ({ tone, icon, iconClassName, title, body, actionLabel, onAction }) => {
   const borderClass = {
     muted: 'border-slate-200',
     indigo: 'border-indigo-100',
@@ -140,6 +164,14 @@ const NextActionCard: React.FC<NextActionCardProps> = ({ tone, icon, iconClassNa
             <p className="mt-1 text-sm font-medium leading-relaxed text-slate-500">
               {body}
             </p>
+            {actionLabel && onAction && (
+              <button
+                onClick={onAction}
+                className="mt-4 inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-indigo-700 active:scale-95"
+              >
+                {actionLabel}
+              </button>
+            )}
           </div>
         </div>
       </div>

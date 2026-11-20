@@ -1,0 +1,40 @@
+name: verify
+
+# Runs the same command as the local pre-handoff check: type-check, the full
+# test suite, and the production build (ARCHITECTURE §50). It needs no secrets
+# and no .env.local; the build falls back to an empty BROWSER_GEMINI_API_KEY (GEMINI_API_KEY is server-only and never read by the build).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Nothing here writes to the repository or calls the GitHub API.
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR makes the older run pointless.
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same Node version as local development (.nvmrc) and the Dockerfile.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run verify
+
+      # Private publication tooling is omitted from the public Showcase copy.
+      - name: Check showcase exporter when present
+        if: ${{ hashFiles('scripts/showcase/export.integration.mjs') != '' }}
+        run: node --test scripts/showcase/export.integration.mjs

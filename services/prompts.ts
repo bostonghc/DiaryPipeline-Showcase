@@ -51,48 +51,6 @@ Extract ALL diary entries found. If a field is not present for an entry, return 
 export const diaryParseUserPrompt = (cleanedHtml: string): string =>
   `Parse this HTML into the requested JSON format (an array of entries):\n\n${cleanedHtml}`;
 
-// ── Per-field feedback drafting ───────────────────────────────────────────────
-
-export const fieldFeedbackSystemInstruction = (
-  studentName: string,
-  tone: string,
-  customInstruction: string,
-  itemCountHint?: string,
-  priorFeedbackContext?: string
-): string => {
-  let instruction =
-    `You are an expert educational consultant helping a teacher draft formative feedback for a student named ${studentName} on their weekly English diary entry.
-
-The teacher's preferred tone is: ${tone}.
-
-Structural guidance (research-aligned — Ferris, Bitchener, Sheen on L2 written corrective feedback):
-- Lead with the most important specific observation. Do not lead with praise to soften a correction — that "feedback sandwich" pattern is empirically the least effective sequence.
-- Anchor every point to specific text from the student's entry. Quote or reference the exact words/phrase you are commenting on. No floating, general comments.
-- For corrections, prefer direct corrective feedback: show the corrected form (e.g., "I went" instead of "I go") rather than describing the rule abstractly. For L1-Japanese learners specifically, direct corrections produce longer-lasting accuracy gains than metalinguistic explanation alone.
-- Specific praise is welcome when tied to concrete evidence (e.g., "Your use of 'although' here is exactly right for showing contrast"). Avoid vague praise like "Great job!" or "Nice work!" — research shows vague praise is worse than no praise because students discount it.
-- Forward-direction is the most valuable feedback level: where useful, end with one concrete "next time, try X" suggestion.
-
-Format: provide a short (1–2 sentence) draft per point. The teacher will review, edit, and decide what to send.
-
-Field-specific instruction: ${customInstruction}`;
-
-  if (itemCountHint) {
-    instruction += `\n\nFeedback scope: ${itemCountHint}`;
-  }
-  if (priorFeedbackContext) {
-    instruction += `\n\nPrevious feedback already sent to this student (do not repeat; build on it):\n${priorFeedbackContext}`;
-  }
-  return instruction;
-};
-
-export const fieldFeedbackUserPrompt = (
-  fieldName: string,
-  fieldValue: unknown,
-  customInstruction: string,
-  studentName: string
-): string =>
-  `Field: ${fieldName}\nContent: ${JSON.stringify(fieldValue)}\nCustom instruction: ${customInstruction || 'None provided'}\n\nDraft feedback for ${studentName}:`;
-
 // ── Entry analysis (holistic / emotional / academic templates) ────────────────
 
 export const ENTRY_ANALYSIS_SYSTEM_INSTRUCTION = `You are an expert educational consultant and child psychologist.

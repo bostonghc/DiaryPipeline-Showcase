@@ -1,11 +1,25 @@
 
-import { Client } from "@microsoft/microsoft-graph-client";
+import {
+  Client,
+  CustomAuthenticationProvider,
+  HTTPMessageHandler,
+  MiddlewareFactory,
+  type Context as GraphMiddlewareContext,
+  type Middleware,
+} from "@microsoft/microsoft-graph-client";
 import { EducationClass, EmailResolutionResult, Student, StudentIdentity, JournalEntry, NotebookNode } from "../types";
 import { parseJournalTable } from "./parserService";
 
-const GRAPH_MAX_RETRIES = 4;
-const GRAPH_BASE_DELAY_MS = 3000;
-const GRAPH_DEFAULT_RETRY_AFTER_MS = 60000;
+export const GRAPH_FORBIDDEN_EVENT = 'journaler:graph-forbidden';
+
+export interface GraphForbiddenDetail {
+  path: string;
+  classId?: string;
+}
+
+const getClassIdFromGraphPath = (path: string): string | undefined =>
+  path.match(/^\/?groups\/([^/]+)/)?.[1] ||
+  path.match(/^\/?education\/classes\/([^/]+)/)?.[1];
 
 const isCollaborationSpaceName = (value: string): boolean => /collaboration space/i.test(value);
 const isDiaryLikeName = (value: string): boolean => /diary|journal|week/i.test(value);
@@ -66,15 +80,19 @@ const parseRetryAfterMs = (headers: Headers | null): number | null => {
   return null;
 };
 
-const createGraphRateLimitError = (retryAfterMs: number, retries: number): Error & { statusCode: number; code: string; retryAfterMs: number; retries: number } => {
-  const error = new Error(`Microsoft Graph rate limit reached. Please retry in ${Math.ceil(retryAfterMs / 1000)}s.`);
-  return Object.assign(error, {
-    statusCode: 429,
-    code: 'GRAPH_RATE_LIMIT',
-    retryAfterMs,
-    retries,
-  });
-};
+/**
+ * Retry-After from an exhausted Graph error, in milliseconds.
+ *
+ * The SDK's RetryHandler already honours Retry-After while retrying; this reads
+ * the value off the error that survives *after* retries are exhausted, so the
+ * app-level cooldown can use the server's number instead of a fixed guess.
+ * GraphError retains the response headers, so no synthesized error is needed.
+ *
+ * Note: Microsoft documents OneNote as not returning Retry-After on 429, so the
+ * caller's fallback is the normal path for OneNote and this is the exception.
+ */
+export const getGraphRetryAfterMs = (error: any): number | null =>
+  parseRetryAfterMs(error?.headers ?? null);
 
 class ConcurrencyLimiter {
   private queue: (() => void)[] = [];
@@ -101,53 +119,76 @@ class ConcurrencyLimiter {
   }
 }
 
-const limiter = new ConcurrencyLimiter(2); // Cap concurrent Graph requests conservatively
+// Per-tab Graph concurrency gate.
+//
+// One semaphore per JavaScript realm: it coordinates every GraphService instance
+// and workflow in a single browser tab. It does NOT coordinate across tabs,
+// users, devices, or server processes — see ARCHITECTURE for the tiering.
+//
+// Retry is NOT implemented here. The SDK's default middleware chain already
+// retries 429/503/504 three times honouring Retry-After; this module previously
+// carried a second, unreachable retry implementation (`fetchWithRetry`), which
+// has been removed. Concurrency is the one thing the SDK does not provide.
+const graphConcurrencySemaphore = new ConcurrencyLimiter(2);
 
-const fetchWithRetry = async (url: string, options: any, retries = 0): Promise<Response> => {
-  await limiter.acquire();
-  try {
-    const response = await fetch(url, options);
-    if (response.status === 429 || response.status >= 500) {
-      if (response.status === 429) {
-        console.log(`[Telemetry] graph_429_count`);
-      }
-      const retryAfterMs =
-        parseRetryAfterMs(response.headers) ??
-        GRAPH_BASE_DELAY_MS * Math.pow(2, retries) + Math.random() * 1000;
+/**
+ * Middleware adapter holding a slot around one network attempt.
+ *
+ * Placement matters: this sits immediately before HTTPMessageHandler, i.e.
+ * *below* RetryHandler. A gate wrapping the whole SDK request would keep its
+ * slot occupied during retry sleeps (Retry-After is honoured up to 180s per
+ * attempt), stalling unrelated Graph work for minutes. Gating each attempt
+ * means backoff sleeps and redirect handling happen outside the slot.
+ *
+ * One adapter is created per client while the semaphore is shared: Middleware
+ * carries mutable `setNext` state, so reusing a single instance across clients
+ * would let a later client rewrite an earlier client's downstream handler.
+ */
+class GraphConcurrencyMiddleware implements Middleware {
+  private nextMiddleware?: Middleware;
 
-      if (response.status === 429 && retries >= GRAPH_MAX_RETRIES) {
-        console.log(`[Telemetry] retry_exhausted`);
-        throw createGraphRateLimitError(Math.round(retryAfterMs), retries);
-      }
+  constructor(private readonly semaphore: ConcurrencyLimiter) {}
 
-      if (retries >= GRAPH_MAX_RETRIES) {
-        console.log(`[Telemetry] retry_exhausted`);
-        return response;
-      }
-      
-      console.log(`[Telemetry] retry_scheduled: ${response.status} in ${Math.round(retryAfterMs)}ms`);
-      console.log(`[GraphService] Rate limited or server error (${response.status}). Retrying in ${Math.round(retryAfterMs)}ms... (Attempt ${retries + 1}/${GRAPH_MAX_RETRIES})`);
-      await new Promise(res => setTimeout(res, retryAfterMs));
-      return await fetchWithRetry(url, options, retries + 1);
-    }
-    return response;
-  } catch (error) {
-    if ((error as any)?.statusCode === 429 || (error as any)?.code === 'GRAPH_RATE_LIMIT') {
-      throw error;
-    }
-
-    if (retries >= GRAPH_MAX_RETRIES) {
-      console.log(`[Telemetry] retry_exhausted`);
-      throw error;
-    }
-    const delay = GRAPH_BASE_DELAY_MS * Math.pow(2, retries) + Math.random() * 1000;
-    console.log(`[Telemetry] retry_scheduled: network error in ${Math.round(delay)}ms`);
-    console.log(`[GraphService] Network error. Retrying in ${Math.round(delay)}ms... (Attempt ${retries + 1}/${GRAPH_MAX_RETRIES})`);
-    await new Promise(res => setTimeout(res, delay));
-    return await fetchWithRetry(url, options, retries + 1);
-  } finally {
-    limiter.release();
+  setNext(next: Middleware): void {
+    this.nextMiddleware = next;
   }
+
+  async execute(context: GraphMiddlewareContext): Promise<void> {
+    if (!this.nextMiddleware) throw new Error('GraphConcurrencyMiddleware has no next middleware.');
+    await this.semaphore.acquire();
+    try {
+      await this.nextMiddleware.execute(context);
+    } finally {
+      // Released on rejection too, or one failed request would leak a slot and
+      // eventually deadlock the tab's Graph queue.
+      this.semaphore.release();
+    }
+  }
+}
+
+/**
+ * Default SDK chain with the concurrency gate spliced in before the transport.
+ *
+ * Built from MiddlewareFactory rather than by hand so the app keeps inheriting
+ * SDK changes to chain composition (e.g. RedirectHandler is included only in
+ * Node). The single maintained assumption is that HTTPMessageHandler is last;
+ * it is asserted here so an SDK change fails loudly at construction instead of
+ * silently moving the gate to the wrong position.
+ */
+export const buildGraphMiddlewareChain = (
+  authProvider: CustomAuthenticationProvider,
+  semaphore: ConcurrencyLimiter = graphConcurrencySemaphore
+): Middleware[] => {
+  const chain = MiddlewareFactory.getDefaultMiddlewareChain(authProvider);
+  const transport = chain[chain.length - 1];
+  if (!(transport instanceof HTTPMessageHandler)) {
+    throw new Error(
+      'Unexpected Graph middleware chain: expected HTTPMessageHandler last. ' +
+      'The concurrency gate must sit immediately before the transport.'
+    );
+  }
+  chain.splice(chain.length - 1, 0, new GraphConcurrencyMiddleware(semaphore));
+  return chain;
 };
 
 /**
@@ -179,20 +220,20 @@ export const buildOneOnOneChatPayload = (senderId: string, recipientId: string) 
 // whether diary discovery is finding everything that actually exists. This is
 // a diagnostic: it never mutates discovery behavior. For each section inside
 // the Collaboration Space it reports both the count a single default `/pages`
-// call returns (what getSectionPages currently sees) and the true paged count,
-// so truncation from the missing `@odata.nextLink` handling is visible.
+// call returns and the true paged count. Discovery now follows every nextLink;
+// the comparison remains useful for confirming that pagination was required.
 
 export interface AuditSectionCount {
   id: string;
   displayName: string;
   diaryLike: boolean;
-  /** Pages returned by one default `.get()` — what getSectionPages currently discovers. */
+  /** Pages discovered by the paginated production method. */
   currentMethodCount: number;
-  /** True if the default page had a nextLink, i.e. current code silently truncates here. */
+  /** True if discovery needed more than the first Graph response. */
   defaultHadNextLink: boolean;
   /** Full count after following every `@odata.nextLink`. */
   trueCount: number;
-  /** trueCount - currentMethodCount; pages the current code drops. */
+  /** Kept for dashboard compatibility; zero now that discovery is paginated. */
   droppedByCurrentMethod: number;
   error?: string;
 }
@@ -228,64 +269,111 @@ export interface NotebookStructureAudit {
   };
 }
 
+/**
+ * True for a Graph throttling response. Kept here so the Graph layer can decide
+ * what to rethrow without importing App-level helpers.
+ */
+export const isGraphThrottleError = (error: any): boolean => {
+  const message = String(error?.message || '');
+  return error?.statusCode === 429 || /\b429\b|too many requests/i.test(message);
+};
+
+/**
+ * Human-readable description of a Graph/proxy failure. Always includes the
+ * status code, so even an error we have no message for stays diagnosable
+ * instead of collapsing into "Unknown API Error".
+ */
+export const describeGraphError = (error: any): string => {
+  const status = typeof error?.statusCode === 'number' && error.statusCode > 0
+    ? error.statusCode
+    : null;
+  const code = error?.code && error.code !== 'undefined' ? String(error.code) : null;
+  const message = error?.message ? String(error.message) : null;
+  const detail = message || code || 'no error detail returned';
+  return status ? `HTTP ${status} — ${detail}` : detail;
+};
+
+/**
+ * Correlation id for one sync run. Requests carry it to the BFF so per-run
+ * Graph cost can be counted; it is random and carries no user information.
+ */
+export const createSyncRunId = (): string =>
+  (globalThis.crypto?.randomUUID?.() ??
+    '00000000-0000-4000-8000-' + Date.now().toString(16).padStart(12, '0').slice(-12));
+
 export class GraphService {
   private client: Client;
   private useProxy: boolean;
   private accessToken?: string;
+  /** Correlates every Graph request in one sync run, for BFF telemetry. */
+  private syncRunId?: string;
 
-  constructor(accessToken?: string, useProxy: boolean = false) {
+  constructor(accessToken?: string, useProxy: boolean = false, syncRunId?: string) {
     this.useProxy = useProxy;
-    this.accessToken = accessToken;
-    
-    // Custom fetch implementation to route requests through our proxy
-    const customFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (useProxy) {
-        const urlStr = input.toString();
-        const graphBase = "https://graph.microsoft.com/v1.0/";
-        
-        if (urlStr.startsWith(graphBase)) {
-          const path = urlStr.substring(graphBase.length);
-          const proxyUrl = `/api/graph/${path}`;
-          
-          // If we have a token, we can send it, but the proxy will primarily 
-          // rely on the session cookie if the token is missing.
-          const headers = new Headers(init?.headers);
-          if (headers.get('Authorization') === 'Bearer dummy-token-for-proxy') {
-            headers.delete('Authorization');
-          }
-          if (accessToken && !headers.has('Authorization')) {
-            headers.set('Authorization', `Bearer ${accessToken}`);
-          }
-          
-          return fetchWithRetry(proxyUrl, { ...init, headers });
-        }
-      }
-      return fetchWithRetry(input.toString(), init);
-    };
+    this.accessToken = useProxy ? undefined : accessToken;
+    this.syncRunId = syncRunId;
 
-    this.client = Client.init({
-      authProvider: (done) => {
-        // Provide the token if we have it, otherwise provide a dummy string
-        // The proxy will handle auth via session cookies if this is empty.
-        // The Graph SDK throws an error if the token is completely empty.
-        done(null, accessToken || "dummy-token-for-proxy");
-      },
-      fetchOptions: {
-        // @ts-ignore
-        customFetch: customFetch
-      }
+    const proxyBaseUrl = typeof window !== 'undefined'
+      ? `${window.location.origin}/api/graph`
+      : 'http://localhost/api/graph';
+
+    // initWithMiddleware rather than init: the concurrency gate has to be inside
+    // the chain (below RetryHandler), which init's implicit chain does not allow.
+    // Client.init would otherwise wrap this same callback provider itself.
+    const authProvider = new CustomAuthenticationProvider((done) => {
+      // The SDK requires a non-empty auth value even when the same-origin BFF
+      // owns the real token. The proxy marker is not a bearer credential and
+      // server.ts ignores browser Authorization headers.
+      done(null, useProxy ? 'server-session-proxy' : (accessToken || ''));
+    });
+
+    this.client = Client.initWithMiddleware({
+      middleware: buildGraphMiddlewareChain(authProvider),
+      ...(useProxy ? {
+        baseUrl: proxyBaseUrl,
+        defaultVersion: '',
+        customHosts: new Set([new URL(proxyBaseUrl).hostname]),
+        fetchOptions: { credentials: 'same-origin' as RequestCredentials },
+      } : {}),
     });
   }
 
   private api(path: string) {
-    if (this.useProxy) {
-      // The Graph Client automatically prepends 'https://graph.microsoft.com/v1.0'
-      // We must override the base URL for the client to point to our proxy instead.
-      // However, the client doesn't easily let us change the base URL per request.
-      // Instead, we will use a custom fetch implementation in the constructor.
-      return this.client.api(path);
+    const request: any = this.syncRunId
+      ? this.client.api(path).header('X-Sync-Run-Id', this.syncRunId)
+      : this.client.api(path);
+    if (!this.useProxy || typeof window === 'undefined') return request;
+
+    for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+      const original = request[method]?.bind(request);
+      if (!original) continue;
+      request[method] = async (...args: any[]) => {
+        try {
+          return await original(...args);
+        } catch (error: any) {
+          if (error?.statusCode === 403) {
+            window.dispatchEvent(new CustomEvent<GraphForbiddenDetail>(GRAPH_FORBIDDEN_EVENT, {
+              detail: { path, classId: getClassIdFromGraphPath(path) },
+            }));
+          }
+          throw error;
+        }
+      };
     }
-    return this.client.api(path);
+    return request;
+  }
+
+  private continuationPath(nextLink: string): string {
+    if (!this.useProxy) return nextLink;
+    try {
+      const url = new URL(nextLink);
+      const path = url.pathname
+        .replace(/^\/v1\.0/, '')
+        .replace(/^\/api\/graph/, '');
+      return `${path}${url.search}`;
+    } catch {
+      return nextLink;
+    }
   }
 
   private getNotebookBasePath(classId: string, notebookId: string): string {
@@ -318,13 +406,19 @@ export class GraphService {
       children: [],
     }));
 
-    const nestedSections = (
-      await Promise.all(
-        (nestedGroupsResponse.value || []).map((group: any) =>
-          this.collectDiarySections(classId, group.id, [...lineage, group.displayName])
-        )
-      )
-    ).flat();
+    // Sequential, not Promise.all: the concurrency gate bounds how many requests
+    // are in flight, but a recursive fan-out still builds an unbounded pending
+    // promise tree on a deep notebook. Depth is small in practice, so the cost
+    // is latency on an already-gated path.
+    const nestedSections: NotebookNode[] = [];
+    for (const group of (nestedGroupsResponse.value || [])) {
+      const groupSections = await this.collectDiarySections(
+        classId,
+        group.id,
+        [...lineage, group.displayName]
+      );
+      nestedSections.push(...groupSections);
+    }
 
     const diarySections = directSections.filter((section) => isDiaryLikeName(section.displayName));
     if (diarySections.length > 0) return diarySections;
@@ -576,11 +670,24 @@ export class GraphService {
         : `/groups/${classId}/onenote/sections/${sectionId}`;
         
       // Fetch metadata first
-      const pagesResponse = await this.api(`${sectionBasePath}/pages`)
+      const firstResponse = await this.api(`${sectionBasePath}/pages`)
         .select("id,title,lastModifiedDateTime,contentUrl")
         .get();
 
-      for (const page of pagesResponse.value) {
+      const pageValues = [...(firstResponse.value || [])];
+      let next: string | undefined = firstResponse['@odata.nextLink'];
+      let pageNumber = 1;
+      while (next && pageNumber < 100) {
+        const response = await this.api(this.continuationPath(next)).get();
+        pageValues.push(...(response.value || []));
+        next = response['@odata.nextLink'];
+        pageNumber += 1;
+      }
+      if (next) {
+        throw new Error('Page listing exceeded the 100-response safety limit.');
+      }
+
+      for (const page of pageValues) {
         const title = page.title || "Untitled Page";
         const match = title.match(/(?<!\d)(\d{7})(?!\d)/);
         
@@ -617,10 +724,16 @@ export class GraphService {
       if (err.statusCode === 401 || err.message?.includes('401') || err.message?.includes('expired')) {
         throw err;
       }
+      // Throttling must reach the caller so the sync-wide Graph cooldown can
+      // engage. Swallowing it into a placeholder made a rate-limited section
+      // look like a broken one and let the run keep hammering Graph.
+      if (isGraphThrottleError(err)) {
+        throw err;
+      }
       console.warn(`Failed to fetch pages for section ${sectionId}`, err);
       pages.push({
         id: `error-${sectionId}`,
-        displayName: `⚠️ Error loading pages: ${err.message || 'Unknown API Error'}`,
+        displayName: `⚠️ Error loading pages: ${describeGraphError(err)}`,
         type: 'page',
         contentUrl: '',
         lastModified: ''
@@ -687,7 +800,7 @@ export class GraphService {
       warnings.push('No sections found inside a "Collaboration Space" section group — diary discovery would find nothing here.');
     }
     if (totals.collabPagesDropped > 0) {
-      warnings.push(`${totals.collabPagesDropped} diary page(s) exist beyond the first response and are dropped by the current (un-paginated) getSectionPages.`);
+      warnings.push(`${totals.collabPagesDropped} diary page(s) were not returned by paginated discovery.`);
     }
 
     return {
@@ -759,14 +872,13 @@ export class GraphService {
       : `/groups/${classId}/onenote/sections/${sectionId}`;
 
     try {
-      // Replicate the exact call getSectionPages makes (no $top) to measure what
-      // the current code would discover, then follow nextLink for the true total.
+      // Measure the first response, then follow the same continuation path used
+      // by production discovery to verify the complete total.
       const first = await this.api(`${sectionBasePath}/pages`)
         .select('id,title,lastModifiedDateTime,contentUrl')
         .get();
 
-      const currentMethodCount = (first.value || []).length;
-      let trueCount = currentMethodCount;
+      let trueCount = (first.value || []).length;
       let next: string | undefined = first['@odata.nextLink'];
       const defaultHadNextLink = !!next;
 
@@ -782,10 +894,10 @@ export class GraphService {
         id: sectionId,
         displayName,
         diaryLike,
-        currentMethodCount,
+        currentMethodCount: trueCount,
         defaultHadNextLink,
         trueCount,
-        droppedByCurrentMethod: trueCount - currentMethodCount,
+        droppedByCurrentMethod: 0,
       };
     } catch (err: any) {
       return {

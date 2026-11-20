@@ -33,16 +33,22 @@ export const BUILT_IN_PRESETS: ExportPreset[] = [
   },
 ];
 
-export const useExportPresets = (db: Firestore, uid: string) => {
+export const useExportPresets = (db: Firestore, uid: string, enabled = true) => {
   const [customPresets, setCustomPresets] = useState<ExportPreset[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(enabled);
 
   useEffect(() => {
+    if (!enabled) {
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
     loadUserPreferences(db, uid)
       .then((prefs) => setCustomPresets(prefs.exportPresets ?? []))
       .catch(() => { /* built-ins still work */ })
       .finally(() => setIsLoading(false));
-  }, [db, uid]);
+  }, [db, uid, enabled]);
 
   const allPresets = [...BUILT_IN_PRESETS, ...customPresets];
 

@@ -19,6 +19,11 @@ type CellData = {
 
 type TableRow = CellData[];
 
+export interface LabeledDiaryProgressVocabCounts {
+  japaneseComplete: number;
+  englishOrExampleComplete: number;
+}
+
 const LABEL_PATTERNS: Record<LabelField, RegExp[]> = {
   date: [/^date\b/i],
   weather: [/^weather\b/i],
@@ -102,38 +107,150 @@ const countPhotos = (value: string, imageCount = 0): number => {
   return Math.max(explicit ? Number(explicit[1]) : 0, placeholders, imageCount);
 };
 
-const parseBracketedFeedback = (value: string): PeerFeedback[] => {
-  const normalized = normalizeText(normalizeBracketStyle(value));
-  if (!normalized) return [];
+// ---------------------------------------------------------------------------
+// Peer-feedback cells
+//
+// Students label comments inconsistently: `[Hina] text`, `{Rea}`, `<maaya>`,
+// a name alone on its own line, or several bracketed names on one
+// line before anyone has commented. Splitting every unrecognised line into its
+// own "Unspecified" comment inflated comment counts by about a fifth and hid
+// the names. Rules:
+// - `[ ]` at the start of a line accepts any label (the original convention);
+//   `{ }` and `< >` only a name, and only at the start of a line or straight
+//   after another label. Later in a line only a name in `[ ]` starts a new
+//   label. `( )` is a label only at the very start of a line — `(Hiroto) I
+//   think…` or a whole-line `(Yuzuna)` — so "I liked (your) picture" stays text.
+//   Tortoise-shell `〔Hiyu〕` counts as `[ ]`.
+// - A comment runs across lines until the next label (replies stay attached).
+// - With no bracketed labels at all, lines that are just a name become labels
+//   only when the cell alternates name / comment; otherwise each line remains
+//   an unlabelled comment, as before.
+// - A label with no comment is not a comment.
+// ---------------------------------------------------------------------------
 
-  const matches = Array.from(
-    normalized.matchAll(/(?:^|\n+)\s*\[([^\]\n]+)\]\s*[:：\-]?\s*([\s\S]*?)(?=(?:\n+\s*\[[^\]\n]+\]\s*[:：\-]?)|$)/g)
-  );
-  if (matches.length > 0) {
-    let unresolvedCount = 0;
-    return matches
-      .map((match) => {
-        const contributor = normalizeInlineText(match[1]).replace(/^[\s:：\-–—]+|[\s:：\-–—]+$/g, '');
-        if (contributor) {
-          return {
-            contributor,
-            feedback: normalizeText(match[2]),
-          };
-        }
-        unresolvedCount += 1;
-        return {
-          contributor: `Unspecified ${unresolvedCount}`,
-          feedback: normalizeText(match[2]),
-        };
-      })
-      .filter((item) => item.contributor || item.feedback);
+const FEEDBACK_BRACKETS: Record<string, string> = { '[': ']', '{': '}', '<': '>', '(': ')' };
+
+const normalizeFeedbackBrackets = (value: string): string =>
+  normalizeBracketStyle(value)
+    .replace(/｛/g, '{').replace(/｝/g, '}')
+    .replace(/[＜〈《]/g, '<').replace(/[＞〉》]/g, '>')
+    .replace(/[〔〘]/g, '[').replace(/[〕〙]/g, ']')
+    .replace(/（/g, '(').replace(/）/g, ')');
+
+/** One to four words of letters (any script), as a name would be. */
+const isNameLike = (value: string): boolean => {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 30) return false;
+  if (!/^[\p{L}\p{M}][\p{L}\p{M} .'’・\-]*$/u.test(trimmed)) return false;
+  return trimmed.split(/\s+/).length <= 4;
+};
+
+/**
+ * A line that is only a name: short, no sentence punctuation, and either one
+ * word or capitalised words ("Hina Yamada", not "Very good").
+ */
+const isBareNameLine = (line: string): boolean => {
+  const trimmed = line.trim();
+  if (!isNameLike(trimmed) || trimmed.length > 24 || /[.!?。！？]$/.test(trimmed)) return false;
+  const words = trimmed.split(/\s+/);
+  return words.length === 1 || (words.length <= 3 && words.every((word) => !/^[a-z]/.test(word)));
+};
+
+interface FeedbackPiece {
+  label: string | null;
+  text: string;
+}
+
+const LABEL_SEPARATOR = /^\s*[:：\-–—]\s*/;
+
+/** Split one line into labelled pieces wherever a bracketed label appears. */
+const splitFeedbackLine = (line: string): FeedbackPiece[] => {
+  const pieces: FeedbackPiece[] = [];
+  let label: string | null = null;
+  let text = '';
+  let i = 0;
+  while (i < line.length) {
+    const open = line[i];
+    const close = FEEDBACK_BRACKETS[open];
+    const leading = text.trim() === '';
+    const lineStart = label === null && /^\s*$/.test(line.slice(0, i));
+    const atBoundary =
+      open === '('
+        ? lineStart
+        : leading
+          ? i === 0 || label !== null || lineStart
+          : /\s/.test(line[i - 1]) && open === '[';
+    if (close && atBoundary) {
+      const end = line.indexOf(close, i + 1);
+      const inner = end > i ? line.slice(i + 1, end) : '';
+      const accepted = end > i && inner.trim() && !inner.includes('\n') && inner.length <= 40 &&
+        (open === '[' && leading ? true : isNameLike(inner));
+      if (accepted) {
+        if (label !== null || text.trim()) pieces.push({ label, text });
+        label = inner.trim().replace(/^[\s:：\-–—]+|[\s:：\-–—]+$/g, '');
+        text = '';
+        i = end + 1;
+        const sep = line.slice(i).match(LABEL_SEPARATOR);
+        if (sep) i += sep[0].length;
+        continue;
+      }
+    }
+    text += open;
+    i += 1;
+  }
+  if (label !== null || text.trim()) pieces.push({ label, text });
+  return pieces;
+};
+
+export const parseFeedbackCell = (value: string): PeerFeedback[] => {
+  const normalized = normalizeText(normalizeFeedbackBrackets(value));
+  if (!normalized) return [];
+  const lines = normalized.split(/\n+/).map((line) => normalizeText(line)).filter(Boolean);
+
+  // Group lines into segments: a label starts a segment, other text continues it.
+  const segments: Array<{ label: string | null; lines: string[] }> = [];
+  for (const line of lines) {
+    for (const piece of splitFeedbackLine(line)) {
+      const text = piece.text.trim();
+      if (piece.label !== null || segments.length === 0) segments.push({ label: piece.label, lines: text ? [text] : [] });
+      else if (text) segments[segments.length - 1].lines.push(text);
+    }
   }
 
-  return normalized
-    .split(/\n+/)
-    .map((line) => normalizeText(line))
-    .filter(Boolean)
-    .map((line, index) => ({ contributor: `Unspecified ${index + 1}`, feedback: line }));
+  let unresolved = 0;
+  const toFeedback = (label: string | null, body: string[]): PeerFeedback => {
+    if (label) return { contributor: label, feedback: normalizeText(body.join('\n')) };
+    unresolved += 1;
+    return { contributor: `Unspecified ${unresolved}`, feedback: normalizeText(body.join('\n')) };
+  };
+
+  if (segments.some((segment) => segment.label !== null)) {
+    return segments
+      .filter((segment) => segment.lines.length > 0)
+      .map((segment) => toFeedback(segment.label, segment.lines));
+  }
+
+  // No bracketed labels: read top to bottom, starting a new label at a name line
+  // unless the current label has no comment yet (then even a name-like line,
+  // such as a one-word "Nice", is its comment). Accept the reading only when the
+  // cell opens with a name and at least two labels — and 70% of them — got a
+  // comment; a trailing name with nothing after it yet is dropped.
+  const isName = lines.map(isBareNameLine);
+  if (isName[0]) {
+    const bare: Array<{ label: string; lines: string[] }> = [];
+    lines.forEach((line, index) => {
+      const current = bare[bare.length - 1];
+      if (isName[index] && (!current || current.lines.length > 0)) bare.push({ label: line.trim(), lines: [] });
+      else current.lines.push(line);
+    });
+    const answered = bare.filter((segment) => segment.lines.length > 0);
+    const considered = bare.length - (bare[bare.length - 1].lines.length === 0 ? 1 : 0);
+    if (answered.length >= 2 && answered.length >= Math.ceil(considered * 0.7)) {
+      return answered.map((segment) => toFeedback(segment.label, segment.lines));
+    }
+  }
+
+  return lines.map((line) => toFeedback(null, [line]));
 };
 
 const parseVocabularyItems = (value: string): { wordOrPhrase: string }[] => {
@@ -209,11 +326,21 @@ const extractTextBlocks = (htmlContent: string): string[] => {
 const extractTableRows = (htmlContent: string): TableRow[][] => {
   const parser = new DOMParser();
   const doc = parser.parseFromString(htmlContent, 'text/html');
+  const getCellText = (cell: Element): string => {
+    const blocks = Array.from(cell.querySelectorAll('p, div, li'))
+      .map((node) => normalizeText((node.textContent as string) || ''))
+      .filter(Boolean);
+    return normalizeText(
+      blocks.length > 0
+        ? blocks.join('\n')
+        : ((cell.textContent as string) || '')
+    );
+  };
 
   return Array.from(doc.querySelectorAll('table')).map((table) =>
     Array.from(table.querySelectorAll('tr')).map((row) =>
       Array.from(row.querySelectorAll('td, th')).map((cell) => ({
-        text: normalizeText((cell.textContent as string) || ''),
+        text: getCellText(cell),
         imageCount: cell.querySelectorAll('img').length,
       }))
     )
@@ -229,7 +356,7 @@ const mapCellsToEntry = (cells: string[]): ParsedDiaryEntry | null => {
   entry.weekNumber = parseWeekNumber(cells[2]);
   entry.photoCount = countPhotos(cells[3]);
   entry.diaryText = normalizeText(cells[4]);
-  entry.peerFeedback = parseBracketedFeedback(cells[5]);
+  entry.peerFeedback = parseFeedbackCell(cells[5]);
   entry.vocabItems = parseVocabularyItems(cells[6]);
   entry.vocabCount = entry.vocabItems.length;
   entry.translations = parseTranslations(cells[7]);
@@ -290,7 +417,7 @@ const assignLabeledValue = (entry: ParsedDiaryEntry, field: LabelField, value: s
       entry.diaryText = normalizeText([entry.diaryText, normalized].filter(Boolean).join('\n\n'));
       break;
     case 'peerFeedback':
-      entry.peerFeedback = parseBracketedFeedback(normalized);
+      entry.peerFeedback = parseFeedbackCell(normalized);
       break;
     case 'vocabItems':
       entry.vocabItems = parseVocabularyItems(normalized);
@@ -327,7 +454,7 @@ const assignCellValue = (entry: ParsedDiaryEntry, field: LabelField, cell: CellD
       entry.diaryText = normalizeText([entry.diaryText, normalized].filter(Boolean).join('\n\n'));
       break;
     case 'peerFeedback':
-      entry.peerFeedback = parseBracketedFeedback(normalized);
+      entry.peerFeedback = parseFeedbackCell(normalized);
       break;
     case 'vocabItems':
       entry.vocabItems = parseVocabularyItems(normalized);
@@ -499,6 +626,80 @@ const parseLabeledDiaryV1Table = (rows: TableRow[]): ParsedPageContent | null =>
 
   const fallbackEntry = parseLabeledDiaryV1EntryRows(rows, '', 0);
   return fallbackEntry.ok ? [fallbackEntry.entry] : null;
+};
+
+const countLabeledDiaryV1ProgressVocabForEntryRows = (
+  rows: TableRow[],
+): LabeledDiaryProgressVocabCounts => {
+  const counts: LabeledDiaryProgressVocabCounts = {
+    japaneseComplete: 0,
+    englishOrExampleComplete: 0,
+  };
+
+  for (let rowIndex = 0; rowIndex < rows.length - 1; rowIndex += 1) {
+    const labelRow = rows[rowIndex];
+    const valueRow = rows[rowIndex + 1];
+    if (!labelRow || !valueRow) continue;
+
+    const pairCount = Math.min(labelRow.length, valueRow.length);
+    for (let cellIndex = 0; cellIndex < pairCount; cellIndex += 1) {
+      const label = normalizeLabelToken(labelRow[cellIndex].text);
+      const value = valueRow[cellIndex].text;
+      if (label === '[KEYWORDS_JP]') {
+        counts.japaneseComplete += parseVocabularyItems(value).length;
+      }
+      if (label === '[KEYWORDS_EN]' || label === '[KEYWORDS_EN_JP]' || label === '[ENGLISH_DEFINITIONS]') {
+        counts.englishOrExampleComplete += parseVocabularyItems(value).length;
+      }
+    }
+  }
+
+  return counts;
+};
+
+const countLabeledDiaryV1ProgressVocabForTable = (
+  rows: TableRow[],
+): LabeledDiaryProgressVocabCounts[] => {
+  const counts: LabeledDiaryProgressVocabCounts[] = [];
+  let currentRows: TableRow[] = [];
+  let seenSemesterStart = false;
+
+  const pushCurrentEntry = () => {
+    if (currentRows.length === 0) return;
+    counts.push(countLabeledDiaryV1ProgressVocabForEntryRows(currentRows));
+    currentRows = [];
+  };
+
+  rows.forEach((row) => {
+    if (isSemesterStartRow(row)) {
+      seenSemesterStart = true;
+      return;
+    }
+
+    if (isEntryStartRow(row)) {
+      pushCurrentEntry();
+      return;
+    }
+
+    if (isEntryEndRow(row)) {
+      pushCurrentEntry();
+      return;
+    }
+
+    if (seenSemesterStart || currentRows.length > 0) {
+      currentRows.push(row);
+    }
+  });
+
+  pushCurrentEntry();
+  return counts.filter((count) => count.japaneseComplete > 0 || count.englishOrExampleComplete > 0);
+};
+
+export const extractLabeledDiaryProgressVocabCounts = (
+  htmlContent: string,
+): LabeledDiaryProgressVocabCounts[] => {
+  const tables = extractTableRows(htmlContent);
+  return tables.flatMap((rows) => countLabeledDiaryV1ProgressVocabForTable(rows));
 };
 
 const parseLabeledDiaryV1HTML = (htmlContent: string): ParsedPageContent | null => {

@@ -105,9 +105,9 @@ export const WorkspaceHome: React.FC<WorkspaceHomeProps> = ({
               <BookOpen size={22} />
             </div>
             <div className="min-w-0">
-              <h2 className="text-3xl font-bold tracking-tight text-slate-950">Journaler</h2>
+              <h2 className="text-3xl font-bold tracking-tight text-slate-950">Notebook Feedback Studio</h2>
               <p className="mt-1 text-sm font-bold text-slate-700">
-                Journal Feedback and Research Tool
+                Feedback and research for OneNote Class Notebooks · part of DiaryPipeline
               </p>
               <p className="mt-1 max-w-2xl text-sm font-medium leading-relaxed text-slate-500">
                 Review Class Notebook diaries, preserve saved feedback, and sync only the rosters you need.
@@ -253,7 +253,7 @@ const getWorkspaceNextAction = ({
       title: isCheckingAuth ? 'Checking Microsoft session' : 'Connect Microsoft',
       body: isCheckingAuth
         ? 'The app is looking for an existing session before asking you to sign in again.'
-        : 'Sign in first so Journaler can discover Class Notebooks and fetch pages.',
+        : 'Sign in first so the app can discover Class Notebooks and fetch pages.',
       actionLabel: isCheckingAuth ? undefined : isInteracting ? 'Awaiting Microsoft...' : 'Connect Microsoft',
       actionIcon: isInteracting ? <RefreshCw size={16} className="animate-spin" /> : <ShieldCheck size={16} />,
       onAction: isCheckingAuth ? undefined : onLogin,
