@@ -9,16 +9,16 @@ abstract: >-
   server-side AI reviewer comments on their drafts, with explicit per-comment
   Apply and recorded inputs and outcomes. Human-authored messages are delivered
   through Microsoft Teams or email and retained for inspection and export.
-  This release candidate contains the implementation; owner evaluation and
+  This release contains the implementation; owner evaluation and
   wider AI-review pilot enablement remain pending.
 authors:
   - family-names: Carr
     given-names: Geoffrey
     affiliation: "Asahikawa City University"
     orcid: "https://orcid.org/0009-0002-9829-8986"
-version: 1.1.0-rc.1
+version: 1.1.0
 doi: 10.5281/zenodo.23281910
-# Set the final version and actual date-released immediately before tagging v1.1.0.
+date-released: 2026-11-20
 license: MIT
 repository-code: "https://github.com/bostonghc/DiaryPipeline-Showcase"
 keywords:

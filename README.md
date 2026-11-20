@@ -19,7 +19,7 @@ The design principle is **measurement first, dashboard second, research claims l
 
 > This is the public, citable source snapshot. The working repository is private. The export contains synthetic examples and sanitised regression fixtures; live configuration is replaced with placeholders. The tracked OneNote HTML fixture uses an instructor-named sample page, not an unmodified student diary.
 
-## v1.1.0 release candidate
+## v1.1.0 — 20 November 2026
 
 Source snapshot: `d9f6d8f990294a9393a41e4d21434592ceff3e18` (application baseline `53f7fd1`, with export preparation dated 20 November 2026). The public copy changes configuration to placeholders and maintains its own research-facing README and citation metadata.
 
@@ -27,7 +27,7 @@ This update replaces the earlier AI Draft workflow with a reviewer of human-writ
 
 **Implementation is complete; owner evaluation and wider AI-review pilot enablement remain pending.** The synthetic [evaluation checklist](docs/reference/ai-review-evaluation.md) is included with blank result tables. Automated tests do not substitute for these checks or for Firestore rules validation. AI review is owner-only in pilot mode unless lead or intern roles are explicitly enabled. Non-pilot mode retains the legacy single-user owner access and should be used only in a trusted local setup.
 
-The latest published release remains [v1.0.0](https://github.com/bostonghc/DiaryPipeline-Showcase/releases/tag/v1.0.0) until a new release is tagged. Citation metadata identifies this preparation as `1.1.0-rc.1`; it has no release date. Finalising v1.1.0 requires updating that metadata to the final version and actual release date before publishing.
+Version **1.1.0**, dated **20 November 2026**, records this implementation milestone. See the [v1.1.0 release](https://github.com/bostonghc/DiaryPipeline-Showcase/releases/tag/v1.1.0) and [CITATION.cff](CITATION.cff) for release and citation details. The owner evaluation and wider AI-review pilot enablement remain pending.
 
 ## Architecture and access
 
